@@ -32,6 +32,7 @@ class NewtonSolverInfeasibleStart:
         beta=0.6,
         mu=20,
         use_gpu=False,
+        track_loss=False,
     ):
         """Solve convex optimization problem of the following form using infeasible start Newton's method:
         argmin_x  t * obj_fxn(x)
@@ -67,6 +68,7 @@ class NewtonSolverInfeasibleStart:
         self.beta = beta
         self.mu = mu
         self.use_gpu = use_gpu and gpu_flag
+        self.track_loss = track_loss
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values

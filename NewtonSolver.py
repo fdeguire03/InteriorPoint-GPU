@@ -72,6 +72,7 @@ class NewtonSolver:
         self.beta = beta
         self.mu = mu
         self.use_gpu = use_gpu and gpu_flag
+        self.track_loss = track_loss
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values

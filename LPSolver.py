@@ -146,7 +146,7 @@ class LPSolver:
         self.t0 = t0
         self.mu = mu
         self.outer_iters = 0
-        self.inner_iters = 0
+        self.inner_iters = []
         self.max_outer_iters = max_outer_iters
         self.max_inner_iters = max_inner_iters
         self.epsilon = epsilon
@@ -483,7 +483,7 @@ class LPSolver:
         # set initializations based on kwargs passed to function or defaults set when creating LinearSolver object
         t = kwargs.get("t0", self.t0)
         max_outer_iters = kwargs.get("max_outer_iters", self.max_outer_iters)
-        track_loss = kwargs.get("track_loss", self.track_loss)
+        self.track_loss = kwargs.get("track_loss", self.track_loss)
 
         # could add additional ability to override settings set during initialization of LinearSolver object
         # max_inner_iters = kwargs.get("max_inner_iters", self.max_inner_iters)
@@ -497,9 +497,9 @@ class LPSolver:
         self.__check_x0(x)
 
         self.outer_iters = 0
-        self.inner_iters = 0
 
         objective_vals = []
+        self.inner_iters = []
 
         if self.equality_constrained:
             # intialize the dual variable
@@ -516,11 +516,11 @@ class LPSolver:
 
             x, v, numiters_t = self.ns.solve(x, t, v0=v)
 
-            if track_loss:
+            if self.track_loss:
                 objective_vals.append(self.obj(x))
 
             self.outer_iters += 1
-            self.inner_iters += numiters_t
+            self.inner_iters.append(numiters_t)
 
             if not self.suppress_print and numiters_t <= self.max_inner_iters:
                 print(
@@ -587,3 +587,21 @@ class LPSolver:
         if self.A is not None:
             if self.A.shape[1] != len(x):
                 raise ValueError("Initial x must have the same number of columns as A!")
+
+    def plot(self, subtract_cvxpy=True):
+        if not (self.optimal and self.track_loss):
+            raise ValueError(
+                "Need to solve problem with track_loss set to True to be able to plot convergence!"
+            )
+
+        ax = plt.subplot()
+        ax.step(
+            np.cumsum(self.inner_iters),
+            self.objective_vals - self.cvxpy_val,
+            where="post",
+        )
+        ax.set_xlabel("Cumulative Newton iterations")
+        ax.set_ylabel("Optimality gap")
+        ax.set_title("Convergence of LPSolver")
+        ax.set_yscale("log")
+        return ax
