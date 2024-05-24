@@ -594,10 +594,15 @@ class LPSolver:
                 "Need to solve problem with track_loss set to True to be able to plot convergence!"
             )
 
+        if self.use_gpu:
+            obj_vals = [val.get() for val in self.objective_vals]
+        else:
+            obj_vals = self.objective_vals
+            
         ax = plt.subplot()
         ax.step(
             np.cumsum(self.inner_iters),
-            self.objective_vals - self.cvxpy_val,
+            obj_vals - self.cvxpy_val,
             where="post",
         )
         ax.set_xlabel("Cumulative Newton iterations")
