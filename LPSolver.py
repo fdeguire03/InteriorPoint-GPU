@@ -1,14 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import cvxpy as cvx
-from NewtonSolver import (
-    NewtonSolverCG,
-    NewtonSolverDirect,
-    NewtonSolverNPLstSq,
-    NewtonSolverNPSolve,
-    NewtonSolverKKTNPSolve,
-    NewtonSolverCholesky,
-)
+from NewtonSolver import *
+from NewtonSolverInfeasibleStart import *
 
 try:
     import cupy as cp
@@ -29,7 +23,6 @@ class LPSolver:
         C=None,
         d=None,
         sign=1,
-        num_variables=10,
         t0=1,
         max_outer_iters=50,
         max_inner_iters=20,
@@ -43,6 +36,8 @@ class LPSolver:
         mu=15,
         suppress_print=False,
         use_gpu=False,
+        try_diag=True,
+        track_loss=False,
     ):
         """Initialize LP problem of form:
         Minimize c^T x
@@ -52,8 +47,6 @@ class LPSolver:
 
         The remaining parameters:
             sign (default 1): Used to set the sign of x (sign=1 to make x positive, sign=-1 to make x negative, sign=0 if unconstrained on sign)
-
-            num_variables (default 10): Length of vector x to solve for (Used only if no parameter is passed to c)
 
             t0 (default 1): Starting point for interior point method
 
@@ -81,12 +74,10 @@ class LPSolver:
             mu (default 15): parameter for how much to increase t on each centering step
 
             suppress_print (default True): set to True if you want to suppress any potential warnings from being printed during solve method
-        """
 
-        if C is not None or d is not None:
-            raise NotImplementedError(
-                "Inequality constraints beyond positive/negative x are not yet implemented!"
-            )
+            try_diag (default True): set to True if you want to try calcuating all Hessian matrices as diagonal matrices. Potential speedup if Hessian is diagonal,
+                                    really no cost if its not, so recommended to keep as True
+        """
 
         # all attributes for LP
         self.A = A
@@ -98,13 +89,17 @@ class LPSolver:
 
         self.__check_inputs()
 
+        self.equality_constrained = self.A is not None
+
         # initialize x
         # TODO: when using inequality constraints, will need to find a way to get a feasible point
         # (using Phase I methods?)
-        if self.c is None:
-            self.n = num_variables
-        else:
+        if self.c is not None:
             self.n = len(self.c)
+        elif self.A is not None:
+            self.n = self.A.shape[1]
+        elif self.C is not None:
+            self.n = self.C.shape[1]
         self.x = np.random.rand(self.n)
         if self.sign:
             self.x *= self.sign
@@ -156,6 +151,7 @@ class LPSolver:
         self.max_inner_iters = max_inner_iters
         self.epsilon = epsilon
         self.inner_epsilon = inner_epsilon
+        self.max_cg_iters = max_cg_iters
 
         # other housekeeping
         # helper fields to denote when problem has been solved
@@ -166,6 +162,8 @@ class LPSolver:
         self.lam_star = None
         self.vstar = None
         self.suppress_print = suppress_print
+        self.try_diag = try_diag
+        self.track_loss = track_loss
 
         # initialize the newton solver for this problem
         self.__gen_functions()
@@ -243,13 +241,6 @@ class LPSolver:
                 self.obj = lambda x: np.dot(self.c, x)
             obj_grad = self.c
 
-        """I WROTE FUNCTIONS FOR GRADIENT AND HESSIAN OF INEQUALITY CONSTRAINTS Cx<=d BUT
-        THESE FUNCTIONS ARE MOST LIKELY SLIGHTLY WRONG, WILL NEED TO REWRITE TO FUNCTION CORRECTLY!"""
-        if self.C is not None or self.d is not None:
-            raise NotImplementedError(
-                "Inequality constraints beyond positive/negative x are not yet implemented (Need to rewrite gradient and hessian functions)!"
-            )
-
         # gradient and objective of the inequality constraints
         if self.sign == 0:
             signed = False
@@ -269,35 +260,19 @@ class LPSolver:
                 else:
                     signed_log_barrier = lambda x: -np.log(-x).sum()
 
-        if self.d is None and self.C is None:
+        if self.d is None:
             inequality = False
         else:
-            if self.d is None:
-                if self.use_gpu:
-                    inequality_log_barrier = lambda x: -cp.log(-self.C @ x).sum()
-                else:
-                    inequality_log_barrier = lambda x: -np.log(-self.C @ x).sum()
-                C_sum = self.C.sum(axis=0)
-                inequality_obj_grad = lambda x: C_sum / (-self.C @ x)
-            elif self.C is None:
-                if self.use_gpu:
-                    inequality_log_barrier = lambda x: -cp.log(self.d - x).sum()
-                else:
-                    inequality_log_barrier = lambda x: -np.log(self.d - x).sum()
-
-                inequality_obj_grad = lambda x: 1 / (self.d - x)
+            inequality = True
+            if self.use_gpu:
+                inequality_log_barrier = lambda x: -cp.log(self.d - self.C @ x).sum()
             else:
-                if self.use_gpu:
-                    inequality_log_barrier = lambda x: -cp.log(
-                        self.d - self.C @ x
-                    ).sum()
-                else:
-                    inequality_log_barrier = lambda x: -np.log(
-                        self.d - self.C @ x
-                    ).sum()
+                inequality_log_barrier = lambda x: -np.log(self.d - self.C @ x).sum()
 
-                C_sum = self.C.sum(axis=0)
-                inequality_obj_grad = lambda x: C_sum / (self.d - self.C @ x)
+            inequality_grad = lambda x: self.C.T @ (1 / (self.d - self.C @ x))
+            inequality_hessian = lambda x: self.C.T @ (
+                (1 / (self.d - self.C @ x) ** 2)[:, None] * self.C
+            )
 
         if not (inequality or signed):
             barrier = False
@@ -307,25 +282,48 @@ class LPSolver:
                 log_barrier = lambda x: signed_log_barrier(x) + inequality_log_barrier(
                     x
                 )
-                barrier_grad = lambda x: signed_obj_grad(x) + inequality_obj_grad(x)
+                barrier_grad = lambda x: signed_obj_grad(x) + inequality_grad(x)
+
+                def barrier_hessian(x):
+                    # get (the non-diagonal hessian of the inequality constraint),
+                    # extract the diagonal, and add the diagonal elements of the signed
+                    # hessian. Faster than changing the signed hessian to a full matrix
+                    # and adding it (sqrt(n) fewer operations!)
+                    # return False boolean to inform NewtonSolver that hessian is not diagonal
+                    a = inequality_hessian(x)
+                    d = np.einsum("ii->i", a)
+                    d += signed_hessian(x)
+                    return a
+
             elif inequality:
-                log_barrier = lambda x: inequality_log_barrier(x)
-                barrier_grad = lambda x: inequality_obj_grad(x)
+                log_barrier = inequality_log_barrier
+                barrier_grad = inequality_grad
+                barrier_hessian = inequality_hessian  # lambda x : inequality_hessian(x), False  # return False boolean to inform NewtonSolver that hessian is not diagonal
             elif signed:
-                log_barrier = lambda x: signed_log_barrier(x)
-                barrier_grad = lambda x: signed_obj_grad(x)
+                log_barrier = signed_log_barrier
+                barrier_grad = signed_obj_grad
+                barrier_hessian = signed_hessian  # lambda x : signed_hessian(x), True  # return True boolean to inform NewtonSolver that hessian is diagonal
 
         # define the objective, gradient, and hessian functions for the newton solver based on above
         if barrier:
             self.obj_newton = lambda x, t: t * self.obj(x) + log_barrier(x)
             self.grad_newton = lambda x, t: t * obj_grad + barrier_grad(x)
-            self.hessian_newton = lambda x: signed_hessian(x)
-            self.inv_hessian_newton = lambda x: signed_hessian_inverse(x)
+            self.hessian_newton = barrier_hessian
+            if signed:
+                self.inv_hessian_newton = lambda x: signed_hessian_inverse(x)
+            else:
+
+                def raiseException(x):
+                    raise ValueError(
+                        "Hessian is not diagonal, cannot use inv hessian function!"
+                    )
+
+                self.inv_hessian_newton = raiseException
         else:
             self.obj_newton = lambda x, t: t * self.obj(x)
             self.grad_newton = lambda x, t: t * obj_grad
-            self.hessian_newton = lambda x: 0
-            self.inv_hessian_newton = lambda x: 0
+            self.hessian_newton = 0
+            self.inv_hessian_newton = 0
 
     def __get_newton_solver(self, linear_solve_method):
         """Initialize a NewtonSolver object with the specified linear solve method
@@ -334,122 +332,97 @@ class LPSolver:
         """
 
         if linear_solve_method == "np_lstsq":
-            ns = NewtonSolverNPLstSq(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverNPLstSqInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverNPLstSq
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverNPLstSqDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
+
         elif linear_solve_method == "np_solve":
-            ns = NewtonSolverNPSolve(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverNPSolveInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverNPSolve
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverNPSolveDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
         elif linear_solve_method == "direct":
-            ns = NewtonSolverDirect(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverDirectInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDirect
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverDirectDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
         elif linear_solve_method == "cg":
-            ns = NewtonSolverCG(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                max_cg_iters=self.max_cg_iters,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
-        elif linear_solve_method == "kkt_system":
-            ns = NewtonSolverKKTNPSolve(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverCGInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverCG
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverCGDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
+
+        elif linear_solve_method == "kkt":
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverKKTNPSolveInfeasibleStart
+                else:
+                    raise ValueError(
+                        "No KKT System non-equality-constrained problems! Please choose another solver"
+                    )
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverKKTNPSolveDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
         elif linear_solve_method == "cholesky":
-            ns = NewtonSolverCholesky(
-                self.A,
-                self.b,
-                self.C,
-                self.d,
-                self.obj_newton,
-                self.grad_newton,
-                self.hessian_newton,
-                self.inv_hessian_newton,
-                max_iters=self.max_inner_iters,
-                epsilon=self.inner_epsilon,
-                suppress_print=self.suppress_print,
-                sign=self.sign,
-                alpha=self.alpha,
-                beta=self.beta,
-                mu=self.mu,
-                use_gpu=self.use_gpu,
-            )
+            if self.C is not None or not self.try_diag:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverCholeskyInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverCholesky
+            else:
+                if self.equality_constrained:
+                    NewtonClass = NewtonSolverCholeskyDiagonalInfeasibleStart
+                else:
+                    NewtonClass = NewtonSolverDiagonal
         else:
             raise ValueError("Please enter a valid linear solve method!")
+
+        ns = NewtonClass(
+            self.A,
+            self.b,
+            self.C,
+            self.d,
+            self.obj_newton,
+            self.grad_newton,
+            self.hessian_newton,
+            self.inv_hessian_newton,
+            max_iters=self.max_inner_iters,
+            epsilon=self.inner_epsilon,
+            suppress_print=self.suppress_print,
+            max_cg_iters=self.max_cg_iters,
+            sign=self.sign,
+            alpha=self.alpha,
+            beta=self.beta,
+            mu=self.mu,
+            use_gpu=self.use_gpu,
+        )
 
         return ns
 
@@ -467,7 +440,7 @@ class LPSolver:
         if self.c is not None:
             obj = cvx.Minimize(self.c.T @ x)
         else:
-            obj = cvx.Minimize(x)
+            obj = cvx.Minimize(cvx.sum(x))
 
         constr = []
         if self.A is not None:
@@ -502,33 +475,49 @@ class LPSolver:
                     value if already solved
             t0: Override the t0 set during initialization (default 1)
             x0: Override random initialization of x
+            track_loss: Override global setting to track loss during solve
         """
         if not resolve and self.optimal:
-            return self.value
+            return self.value, self.objective_vals
 
         # set initializations based on kwargs passed to function or defaults set when creating LinearSolver object
         t = kwargs.get("t0", self.t0)
         max_outer_iters = kwargs.get("max_outer_iters", self.max_outer_iters)
+        track_loss = kwargs.get("track_loss", self.track_loss)
 
         # could add additional ability to override settings set during initialization of LinearSolver object
         # max_inner_iters = kwargs.get("max_inner_iters", self.max_inner_iters)
         # eps = kwargs.get("epsilon", self.epsilon)
         # inner_eps = kwargs.get("inner_epsilon", self.inner_epsilon)
 
+        if "x0" in kwargs:
+            x = kwargs["x0"]
+
         x = kwargs.get("x0", self.x)
         self.__check_x0(x)
 
-        # intialize the dual variable
-        if self.use_gpu:
-            v = cp.zeros(self.A.shape[0])
+        self.outer_iters = 0
+        self.inner_iters = 0
+
+        objective_vals = []
+
+        if self.equality_constrained:
+            # intialize the dual variable
+            if self.use_gpu:
+                v = cp.zeros(self.A.shape[0])
+            else:
+                v = np.zeros(self.A.shape[0])
         else:
-            v = np.zeros(self.A.shape[0])
+            v = None
 
         dual_gap = self.num_constraints
 
         for iter in range(max_outer_iters):
 
             x, v, numiters_t = self.ns.solve(x, t, v0=v)
+
+            if track_loss:
+                objective_vals.append(self.obj(x))
 
             self.outer_iters += 1
             self.inner_iters += numiters_t
@@ -564,8 +553,9 @@ class LPSolver:
                 self.optimal = True
                 self.value = self.obj(self.xstar)
                 self.optimality_gap = dual_gap
+                self.objective_vals = objective_vals
 
-                return self.value
+                return self.value, self.objective_vals
 
             # increment t for next outer iteration
             t *= self.mu
@@ -582,6 +572,16 @@ class LPSolver:
                 "Initial x must be in domain of problem (all entries negative)"
             )
 
+        if self.c is not None:
+            if len(self.c) != len(x):
+                raise ValueError("Initial x must be the same dimension as c!")
+
         if self.C is not None:
             if (self.C @ x > self.d).any():
                 raise ValueError("Initial x must be in domain of problem (Cx <= d)")
+            if self.C.shape[1] != len(x):
+                raise ValueError("Initial x must have the same number of columns as C!")
+
+        if self.A is not None:
+            if self.A.shape[1] != len(x):
+                raise ValueError("Initial x must have the same number of columns as A!")
