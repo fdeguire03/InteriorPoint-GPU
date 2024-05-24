@@ -182,6 +182,10 @@ class NewtonSolverInfeasibleStart:
             while (next_x >= 0).any():
                 step_size *= self.beta
                 next_x = x + step_size * xstep
+        if self.C is not None:
+            while (self.d - self.C @ next_x <= 0).any():
+                step_size *= self.beta
+                next_x = x + step_size * xstep
 
         # capture results of some matrix multiplies so we don't do repeated calculations
         ATv_cache = self.A.T @ v
@@ -306,11 +310,13 @@ class NewtonSolverNPSolveInfeasibleStart(NewtonSolverInfeasibleStart):
             w = cp.linalg.solve(self.A @ (A11_inv_AT), b2 - self.A @ (A11_inv_b1))
             xstep = -cp.linalg.solve(A11, (b1 + self.A.T @ w))
         else:
+
             A11_inv_AT = np.linalg.solve(A11, self.A.T)
             A11_inv_b1 = np.linalg.solve(A11, b1)
             w = np.linalg.solve(self.A @ (A11_inv_AT), b2 - self.A @ (A11_inv_b1))
             xstep = -np.linalg.solve(A11, (b1 + self.A.T @ w))
         vstep = w - v
+
         return xstep, vstep
 
 
@@ -496,6 +502,7 @@ class NewtonSolverCGInfeasibleStart(NewtonSolverInfeasibleStart):
         alpha=0.2,
         beta=0.6,
         mu=20,
+        use_gpu=False,
     ):
 
         raise NotImplementedError(

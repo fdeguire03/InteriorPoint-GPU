@@ -561,13 +561,15 @@ class LPSolver:
             t *= self.mu
 
     def __check_x0(self, x):
-        """Helper function to ensure initial x is in the domain of the problem"""
+        """Helper function to ensure initial x is in the domain of the problem
 
-        if self.sign > 0 and (x < 0).any():
+        We need a strictly feasible starting point"""
+
+        if self.sign > 0 and (x <= 0).any():
             raise ValueError(
                 "Initial x must be in domain of problem (all entries positive)"
             )
-        elif self.sign < 0 and (x > 0).any():
+        elif self.sign < 0 and (x >= 0).any():
             raise ValueError(
                 "Initial x must be in domain of problem (all entries negative)"
             )
@@ -577,7 +579,7 @@ class LPSolver:
                 raise ValueError("Initial x must be the same dimension as c!")
 
         if self.C is not None:
-            if (self.C @ x > self.d).any():
+            if (self.C @ x >= self.d).any():
                 raise ValueError("Initial x must be in domain of problem (Cx <= d)")
             if self.C.shape[1] != len(x):
                 raise ValueError("Initial x must have the same number of columns as C!")
