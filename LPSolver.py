@@ -514,7 +514,7 @@ class LPSolver:
 
         for iter in range(max_outer_iters):
 
-            x, v, numiters_t = self.ns.solve(x, t, v0=v)
+            x, v, numiters_t, _ = self.ns.solve(x, t, v0=v)
 
             if self.track_loss:
                 objective_vals.append(self.obj(x))
@@ -527,7 +527,7 @@ class LPSolver:
                     f"Reached max Newton steps during {iter}th centering step (t={t})"
                 )
 
-            dual_gap /= t
+            dual_gap = self.n / t
             # alg_progress = np.hstack([alg_progress, np.array([num_iters_t, dual_gap]).reshape(2,1)])
 
             # quit if n/t < epsilon
@@ -558,7 +558,7 @@ class LPSolver:
                 return self.value, self.objective_vals
 
             # increment t for next outer iteration
-            t *= self.mu
+            t = min(t * self.mu, (self.n + 1.0) / self.epsilon)
 
     def __check_x0(self, x):
         """Helper function to ensure initial x is in the domain of the problem
@@ -598,7 +598,7 @@ class LPSolver:
             obj_vals = [val.get() for val in self.objective_vals]
         else:
             obj_vals = self.objective_vals
-            
+
         ax = plt.subplot()
         ax.step(
             np.cumsum(self.inner_iters),

@@ -132,11 +132,11 @@ class NewtonSolverInfeasibleStart:
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
                 if residual_norm < self.eps:
-                    return x, v, iter + 1
+                    return x, v, iter + 1, residual_norm
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
             if self.suppress_print:
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
             print(
                 "REACHED MAX ITERATIONS: Problem likely infeasible or unbounded",
@@ -147,22 +147,22 @@ class NewtonSolverInfeasibleStart:
             if (self.A @ x - self.b < self.eps).all():
                 if not self.suppress_print:
                     print(" (Likely unbounded)")
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
             # else we are not feasible
             else:
                 if not self.suppress_print:
                     print(" (Likely infeasible)")
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
         except np.linalg.LinAlgError as e:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1
+            return x, v, iter + 1, residual_norm
         except cp.linalg.LinAlgError:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1
+            return x, v, iter + 1, residual_norm
 
     def backtrack_search(self, x, v, xstep, vstep, t, gradf, residual_normp=None):
         """Backtracking search for Newton's method ensures that Newton step
