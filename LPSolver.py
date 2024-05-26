@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import cvxpy as cvx
 from NewtonSolver import *
 from NewtonSolverInfeasibleStart import *
+from PhaseOne import phase_one
 
 try:
     import cupy as cp
@@ -107,6 +108,7 @@ class LPSolver:
         # If specified, make sure that the problem is feasible usign CVXPY
         # the CVXPY solution can also be used later to verify the solution of the LinearSolver
         if check_cvxpy:
+            print("Is testing CVXPY")
             self.feasible, self.cvxpy_val = self.__test_feasibility()
             if self.feasible == "infeasible":
                 raise ValueError("Provided problem instance is infeasible!")
@@ -164,6 +166,7 @@ class LPSolver:
         self.suppress_print = suppress_print
         self.try_diag = try_diag
         self.track_loss = track_loss
+        self.linear_solve_method = linear_solve_method
 
         # initialize the newton solver for this problem
         self.__gen_functions()
@@ -455,8 +458,9 @@ class LPSolver:
         prob = cvx.Problem(obj, constr)
         try:
             prob.solve(solver="CLARABEL")
-        except Exception:
-            pass
+        except Exception as e:
+            print(e)
+            
         return prob.status, prob.value
 
     def __str__(self):
@@ -490,10 +494,47 @@ class LPSolver:
         # eps = kwargs.get("epsilon", self.epsilon)
         # inner_eps = kwargs.get("inner_epsilon", self.inner_epsilon)
 
-        if "x0" in kwargs:
-            x = kwargs["x0"]
-
         x = kwargs.get("x0", self.x)
+
+        # Have an intial x
+        if self.A is not None and self.b is not None:
+          if (self.A @ x <= self.b).all():
+            # Good point
+            pass
+          else:
+            # Need to find a feasible point
+            # Create needed matrices if sign is not 0
+            if self.sign != 0:
+              identity = np.eye(self.n)
+              zeros_vec = np.zeros(self.n)
+              
+              G = np.vstack([self.A, - self.sign * identity])
+              h = np.hstack([self.b, zeros_vec])
+            else:
+              G = self.A
+              h = self.b
+            
+            # TODO: implement more solvers in phase on
+            # Although this might not be needed since it usually runs very few iterations
+            if self.linear_solve_method == 'cg':
+              linear_solver = "cg"
+            else:
+              linear_solver = "solve"
+            
+            PhaseOne = phase_one(G, h, self.mu, x0 = x, eps = self.epsilon, 
+                                max_iter_interior = self.max_outer_iters, 
+                                max_iter_newton = self.max_inner_iters,
+                                use_cupy = self.use_gpu, linear_solver = 'cg',
+                                max_cg_iters = self.max_cg_iters)
+            x, s, warn = PhaseOne.solve()
+            
+            if not warn and s > 0:
+              # This mean infeasibility
+              # TODO: Come up with what we do then
+              pass
+
+            del PhaseOne # Delete object since it is no longer needed
+
         self.__check_x0(x)
 
         self.outer_iters = 0
