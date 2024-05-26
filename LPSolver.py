@@ -4,6 +4,7 @@ import cvxpy as cvx
 from NewtonSolver import *
 from NewtonSolverInfeasibleStart import *
 from PhaseOne import phase_one
+from FunctionManager import *
 
 try:
     import cupy as cp
@@ -169,7 +170,7 @@ class LPSolver:
         self.linear_solve_method = linear_solve_method
 
         # initialize the newton solver for this problem
-        self.__gen_functions()
+        self.fm = self.__get_function_manager()
         self.ns = self.__get_newton_solver(linear_solve_method)
 
     def __check_inputs(self):
@@ -221,28 +222,36 @@ class LPSolver:
             if n_C != n_A:
                 raise ValueError("A and C must have the same number of columns!")
 
-    def __gen_functions(self):
+    def __get_function_manager(self):
         """Generate functions to use in solve method
         Be aware of where values were not passed for A,C,b,c,d matrices and vectors
         so that functions are as efficient as possible
-
-        After adding inequality constraints, may need to add a flag for when hessian is diagonal
-        or not to help newton solver be more efficient"""
+        """
 
         # gradient and hessian of the objective
-        if self.c is None:
-            self.obj = lambda x: x.sum()
-            if self.use_gpu:
-                ones_vector = cp.ones(len(self.x))
-            else:
-                ones_vector = np.ones(len(self.x))
-            obj_grad = ones_vector
+        if self.C is None and self.sign == 0:
+            FunctionManagerClass = FunctionManagerUnconstrained
+        elif self.C is None:
+            FunctionManagerClass = FunctionManagerSigned
+        elif self.sign == 0:
+            FunctionManagerClass = FunctionManagerInequalityConstrained
         else:
-            if self.use_gpu:
-                self.obj = lambda x: cp.dot(self.c, x)
-            else:
-                self.obj = lambda x: np.dot(self.c, x)
-            obj_grad = self.c
+            FunctionManagerClass = FunctionManagerConstrained
+
+        fm = FunctionManagerClass(
+            c=self.c,
+            A=self.A,
+            b=self.b,
+            C=self.C,
+            d=self.d,
+            x0=self.x,
+            sign=self.sign,
+            t=1,
+            use_gpu=self.use_gpu,
+            n=self.n,
+        )
+
+        return fm
 
         # gradient and objective of the inequality constraints
         if self.sign == 0:
@@ -412,10 +421,7 @@ class LPSolver:
             self.b,
             self.C,
             self.d,
-            self.obj_newton,
-            self.grad_newton,
-            self.hessian_newton,
-            self.inv_hessian_newton,
+            self.fm,
             max_iters=self.max_inner_iters,
             epsilon=self.inner_epsilon,
             suppress_print=self.suppress_print,
@@ -482,7 +488,7 @@ class LPSolver:
             track_loss: Override global setting to track loss during solve
         """
         if not resolve and self.optimal:
-            return self.value, self.objective_vals
+            return self.value
 
         # set initializations based on kwargs passed to function or defaults set when creating LinearSolver object
         t = kwargs.get("t0", self.t0)
@@ -552,13 +558,19 @@ class LPSolver:
             v = None
 
         dual_gap = self.num_constraints
+        best_x = None
+        best_obj = np.inf
 
         for iter in range(max_outer_iters):
 
-            x, v, numiters_t = self.ns.solve(x, t, v0=v)
+            x, v, numiters_t, _ = self.ns.solve(x, t, v0=v)
 
+            obj_val = self.fm.objective(x)
+            if obj_val < best_obj:
+                best_obj = obj_val
+                best_x = x
             if self.track_loss:
-                objective_vals.append(self.obj(x))
+                objective_vals.append(obj_val)
 
             self.outer_iters += 1
             self.inner_iters.append(numiters_t)
@@ -568,38 +580,39 @@ class LPSolver:
                     f"Reached max Newton steps during {iter}th centering step (t={t})"
                 )
 
-            dual_gap /= t
+            dual_gap = self.n / t
             # alg_progress = np.hstack([alg_progress, np.array([num_iters_t, dual_gap]).reshape(2,1)])
 
             # quit if n/t < epsilon
             if dual_gap < self.epsilon:
-                self.xstar = x
+                self.xstar = best_x
                 if self.C is not None:
                     if self.sign != 0:
                         if self.use_gpu:
                             self.lam_star = cp.append(
-                                1 / (t * (x)), 1 / (t * (self.d - self.C @ x))
+                                1 / (t * (x)), 1 / (t * (self.d - self.C @ best_x))
                             )
                         else:
                             self.lam_star = np.append(
-                                1 / (t * (x)), 1 / (t * (self.d - self.C @ x))
+                                1 / (t * (x)), 1 / (t * (self.d - self.C @ best_x))
                             )
                     else:
-                        self.lam_star = 1 / (t * (self.d - self.C @ x))
+                        self.lam_star = 1 / (t * (self.d - self.C @ best_x))
                 elif self.sign != 0:
-                    self.lam_star = 1 / (t * (x))
+                    self.lam_star = 1 / (t * (best_x))
                 if self.A is not None:
                     self.v_star = v / t
 
                 self.optimal = True
-                self.value = self.obj(self.xstar)
+                self.value = best_obj
                 self.optimality_gap = dual_gap
                 self.objective_vals = objective_vals
 
-                return self.value, self.objective_vals
+                return self.value
 
             # increment t for next outer iteration
-            t *= self.mu
+            t = min(t * self.mu, (self.n + 1.0) / self.epsilon)
+            self.fm.update_t(t)
 
     def __check_x0(self, x):
         """Helper function to ensure initial x is in the domain of the problem
@@ -639,7 +652,7 @@ class LPSolver:
             obj_vals = [val.get() for val in self.objective_vals]
         else:
             obj_vals = self.objective_vals
-            
+
         ax = plt.subplot()
         ax.step(
             np.cumsum(self.inner_iters),

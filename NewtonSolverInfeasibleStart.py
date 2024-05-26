@@ -8,7 +8,6 @@ try:
     gpu_flag = True
 except Exception:
     gpu_flag = False
-    print("Not able to run with GPU")
 
 
 class NewtonSolverInfeasibleStart:
@@ -19,10 +18,7 @@ class NewtonSolverInfeasibleStart:
         b,
         C,
         d,
-        obj_fxn,
-        grad_fxn,
-        hessian_fxn,
-        inv_hessian_fxn,
+        function_manager,
         sign=1,
         max_iters=50,
         epsilon=1e-5,
@@ -54,10 +50,7 @@ class NewtonSolverInfeasibleStart:
         self.sign = sign
 
         # problem functions for solve method
-        self.obj = obj_fxn
-        self.grad = grad_fxn
-        self.hessian = hessian_fxn
-        self.inv_hessian = inv_hessian_fxn
+        self.fm = function_manager
 
         # other housekeeping
         self.max_iters = max_iters
@@ -90,7 +83,7 @@ class NewtonSolverInfeasibleStart:
         # ).T
 
         # precompute gradient since it will be used in multiple locations
-        gradf = self.grad(x, t)
+        gradf = self.fm.gradient(x)
         residual_norm = None
 
         # place everything in a try-except block so we can report if there was an error during solve
@@ -132,11 +125,11 @@ class NewtonSolverInfeasibleStart:
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
                 if residual_norm < self.eps:
-                    return x, v, iter + 1
+                    return x, v, iter + 1, residual_norm
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
             if self.suppress_print:
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
             print(
                 "REACHED MAX ITERATIONS: Problem likely infeasible or unbounded",
@@ -147,22 +140,22 @@ class NewtonSolverInfeasibleStart:
             if (self.A @ x - self.b < self.eps).all():
                 if not self.suppress_print:
                     print(" (Likely unbounded)")
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
             # else we are not feasible
             else:
                 if not self.suppress_print:
                     print(" (Likely infeasible)")
-                return x, v, iter + 1
+                return x, v, iter + 1, residual_norm
 
         except np.linalg.LinAlgError as e:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1
+            return x, v, iter + 1, residual_norm
         except cp.linalg.LinAlgError:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1
+            return x, v, iter + 1, residual_norm
 
     def backtrack_search(self, x, v, xstep, vstep, t, gradf, residual_normp=None):
         """Backtracking search for Newton's method ensures that Newton step
@@ -209,7 +202,7 @@ class NewtonSolverInfeasibleStart:
             residual_norm = np.linalg.norm(r)
 
         # calculate residuals for proposed step
-        next_grad = self.grad(x + step_size * xstep, t)
+        next_grad = self.fm.gradient(x + step_size * xstep)
         rnext_dual = next_grad + ATv_cache + step_size * ATvstep_cache
         rnext_primal = Axb_cache + step_size * Axstep_cache
         if self.use_gpu:
@@ -228,7 +221,7 @@ class NewtonSolverInfeasibleStart:
         # make sure the residual is descending enough
         while next_residual_norm > (1 - self.alpha * step_size) * residual_norm:
             step_size *= self.beta
-            next_grad = self.grad(x + step_size * xstep, t)
+            next_grad = self.fm.gradient(x + step_size * xstep)
             rnext_dual = next_grad + ATv_cache + step_size * ATvstep_cache
             rnext_primal = Axb_cache + step_size * Axstep_cache
             if self.use_gpu:
@@ -264,7 +257,7 @@ class NewtonSolverNPLstSqInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.hessian(x)
+        A11 = self.fm.hessian(x)
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
@@ -303,7 +296,7 @@ class NewtonSolverNPSolveInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.hessian(x)
+        A11 = self.fm.hessian(x)
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
@@ -340,7 +333,7 @@ class NewtonSolverCholeskyInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.hessian(x)
+        A11 = self.fm.hessian(x)
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
@@ -459,7 +452,7 @@ class NewtonSolverDirectInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.hessian(x)
+        A11 = self.fm.hessian(x)
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
@@ -540,7 +533,7 @@ class NewtonSolverCGInfeasibleStart(NewtonSolverInfeasibleStart):
 
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.hessian(x)
+        A11 = self.fm.hessian(x)
         if A11.ndim < 2:
             A11 = np.diag(A11)
 
@@ -549,7 +542,7 @@ class NewtonSolverCGInfeasibleStart(NewtonSolverInfeasibleStart):
         # THIS INITIAL W SHOULD BE BASED ON THE self.last_w PARAMETER THAT IS SAVED
         # descent_check = np.dot(x, gradf)
         # if descent_check < 0:
-        #    x0 = -descent_check * x / np.dot(x, np.dot(self.hessian(x), x))
+        #    x0 = -descent_check * x / np.dot(x, np.dot(self.fm.hessian(x), x))
         # else:
         #    x0 = np.zeros_like(v)
 
@@ -585,7 +578,7 @@ class NewtonSolverKKTNPSolveInfeasibleStart(NewtonSolverInfeasibleStart):
         r = np.append(r_dual, r_primal)
         M = np.bmat(
             [
-                [np.diag(self.hessian(x)), self.A.T],
+                [np.diag(self.fm.hessian(x)), self.A.T],
                 [self.A, np.zeros((self.A.shape[0], self.A.shape[0]))],
             ]
         )
@@ -611,7 +604,7 @@ class NewtonSolverNPLstSqDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian(x)
         if self.use_gpu:
             w = cp.linalg.lstsq(
                 self.A @ (A11_inv[:, None] * self.A.T),
@@ -645,7 +638,7 @@ class NewtonSolverNPSolveDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian(x)
         if self.use_gpu:
             w = cp.linalg.solve(
                 self.A @ (A11_inv[:, None] * self.A.T), b2 - self.A @ (A11_inv * b1)
@@ -680,7 +673,7 @@ class NewtonSolverCholeskyDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian(x)
         if self.use_gpu:
 
             L = cp.linalg.cholesky(self.A @ (A11_inv[:, None] * self.A.T))
@@ -732,7 +725,7 @@ class NewtonSolverDirectDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian(x)
         if self.use_gpu:
             KKT_inv = cp.linalg.inv(self.A @ (A11_inv[:, None] * self.A.T))
         else:
@@ -810,14 +803,14 @@ class NewtonSolverCGDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
 
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian(x)
 
         # get initial x for conjugate gradient
         # TODO: WRITE A CHECK TO GET AN INITIAL W FOR CONJUGATE GRADIENT
         # THIS INITIAL W SHOULD BE BASED ON THE self.last_w PARAMETER THAT IS SAVED
         # descent_check = np.dot(x, gradf)
         # if descent_check < 0:
-        #    x0 = -descent_check * x / np.dot(x, np.dot(self.hessian(x), x))
+        #    x0 = -descent_check * x / np.dot(x, np.dot(self.fm.hessian(x), x))
         # else:
         #    x0 = np.zeros_like(v)
 
@@ -852,7 +845,7 @@ class NewtonSolverKKTNPSolveDiagonalInfeasibleStart(NewtonSolverInfeasibleStart)
         r = np.append(r_dual, r_primal)
         M = np.bmat(
             [
-                [np.diag(self.hessian(x)), self.A.T],
+                [np.diag(self.fm.hessian(x)), self.A.T],
                 [self.A, np.zeros((self.A.shape[0], self.A.shape[0]))],
             ]
         )
