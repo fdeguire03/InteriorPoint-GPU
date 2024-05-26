@@ -9,7 +9,6 @@ try:
     gpu_flag = True
 except Exception:
     gpu_flag = False
-    print("Not able to run with GPU")
 
 
 class NewtonSolver:
@@ -20,10 +19,7 @@ class NewtonSolver:
         b,
         C,
         d,
-        obj_fxn,
-        grad_fxn,
-        hessian_fxn,
-        inv_hessian_fxn,
+        function_manager,
         sign=1,
         max_iters=50,
         epsilon=1e-5,
@@ -58,10 +54,7 @@ class NewtonSolver:
         self.sign = sign
 
         # problem functions for solve method
-        self.obj = obj_fxn
-        self.grad = grad_fxn
-        self.hessian = hessian_fxn
-        self.inv_hessian = inv_hessian_fxn
+        self.fm = function_manager
 
         # other housekeeping
         self.max_iters = max_iters
@@ -87,7 +80,7 @@ class NewtonSolver:
             for iter in range(self.max_iters):
 
                 # precompute gradient since it will be used in multiple locations
-                gradf = self.grad(x, t)
+                gradf = self.fm.gradient(x)
 
                 # invoke linear solve method -- needs to be implemented by a child class
                 xstep = self.newton_linear_solve(x, gradf)
@@ -154,7 +147,7 @@ class NewtonSolver:
 
         # default to step size of 1 -- can only get smaller
         step_size = 1
-        fx = self.obj(x, t)
+        fx = self.fm.newton_objective(x)
         next_x = x + step_size * xstep
         grad_check = gradf.T @ x
 
@@ -173,7 +166,9 @@ class NewtonSolver:
                 step_size *= self.beta
                 next_x = x + step_size * xstep
 
-        while self.obj(next_x, t) > fx + self.alpha * step_size * grad_check:
+        while (
+            self.fm.newton_objective(next_x) > fx + self.alpha * step_size * grad_check
+        ):
             next_x = x + step_size * xstep
             step_size *= self.beta
 
@@ -194,7 +189,7 @@ class NewtonSolverNPLstSq(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
         g = gradf
-        H = self.hessian(x)
+        H = self.fm.hessian(x)
         if self.use_gpu:
             xstep = cp.linalg.lstsq(H, -gradf, rcond=None)[0]
         else:
@@ -213,7 +208,7 @@ class NewtonSolverNPSolve(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H = self.hessian(x)
+        H = self.fm.hessian(x)
 
         if self.use_gpu:
             xstep = cp.linalg.solve(H, -gradf)
@@ -236,7 +231,7 @@ class NewtonSolverCholesky(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H = self.hessian(x)
+        H = self.fm.hessian(x)
         if self.use_gpu:
             L = cp.linalg.cholesky(H)
             xstep = solve_triangular(
@@ -281,7 +276,7 @@ class NewtonSolverDirect(NewtonSolver):
     """
 
     def newton_linear_solve(self, x, gradf):
-        H = self.hessian(x)
+        H = self.fm.hessian(x)
         if self.use_gpu:
             H_inv = cp.linalg.inv(H)
             xstep = H_inv @ -gradf
@@ -343,7 +338,7 @@ class NewtonSolverDiagonal(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H_inv = self.inv_hessian(x)
+        H_inv = self.fm.inv_hessian(x)
         xstep = -H_inv * gradf
 
         return xstep
