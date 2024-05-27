@@ -253,7 +253,10 @@ class PhaseOneSolver:
         factors = self.s + self.h - self.G @ self.x  # factors.shape = (m)
 
         # To ensure correct broadcasting
-        factors_matrix = factors[:, None]
+        if factors.ndim < 2:
+            factors_matrix = factors[:, None]
+        else:
+            factors_matrix = factors.T
 
         scaled_G = self.G / factors_matrix
 
@@ -280,8 +283,14 @@ class PhaseOneSolver:
 
         # from notes, g_i is a row of G
         factors = self.s + self.h - self.G @ self.x  # factors.shape = (m)
-        factors_matrix = factors[:, None]
-        scaled_G = self.G / factors
+
+        # To ensure correct broadcasting
+        if factors.ndim < 2:
+            factors_matrix = factors[:, None]
+        else:
+            factors_matrix = factors.T
+
+        scaled_G = self.G / factors_matrix
 
         if self.use_cupy:
             # To ensure correct broadcasting
