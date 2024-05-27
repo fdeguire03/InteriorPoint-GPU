@@ -149,6 +149,7 @@ class NewtonSolverInfeasibleStart:
                 return x, v, iter + 1, residual_norm
 
         except np.linalg.LinAlgError as e:
+            print("running")
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
             return x, v, iter + 1, residual_norm

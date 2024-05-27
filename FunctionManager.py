@@ -312,7 +312,9 @@ class FunctionManagerInequalityConstrained(FunctionManager):
         if not self.update_hessian:
             return self.hess
 
-        self.hess = self.C.T @ ((1 / self.slacks**2)[:, None] * self.C)
+        self.hess = self.C.T @ (
+            (1 / self.slacks**2)[:, None] * self.C
+        )  # perform the max operation to add some conditioning to the hessian
         self.update_hessian = False
 
         return self.hess
@@ -384,6 +386,7 @@ class FunctionManagerConstrained(FunctionManager):
         self.hess = self.C.T @ ((1 / self.slacks**2)[:, None] * self.C)
         diag = np.einsum("ii->i", self.hess)
         diag += 1 / self.x**2
+        diag += 0.01  # add some conditioning
         self.update_hessian = False
 
         return self.hess

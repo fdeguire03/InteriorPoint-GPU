@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import cvxpy as cvx
 from NewtonSolver import *
 from NewtonSolverInfeasibleStart import *
-from PhaseOne import phase_one
+from PhaseOne import PhaseOneSolver
 from FunctionManager import *
 
 try:
@@ -43,8 +43,8 @@ class LPSolver:
     ):
         """Initialize LP problem of form:
         Minimize c^T x
-        Subject to Ax <= b
-                   Cx == d
+        Subject to Ax == b
+                   Cx <= d
                    x >= 0
 
         The remaining parameters:
@@ -102,9 +102,52 @@ class LPSolver:
             self.n = self.A.shape[1]
         elif self.C is not None:
             self.n = self.C.shape[1]
+
         self.x = np.random.rand(self.n)
         if self.sign:
             self.x *= self.sign
+        # Have an intial x
+        if self.C is not None:
+            if not (self.C @ self.x <= self.d).all():
+                # Need to find a feasible point
+                # Create needed matrices if sign is not 0
+                if self.sign != 0:
+                    identity = np.eye(self.n)
+                    zeros_vec = np.zeros(self.n)
+
+                    G = np.vstack([self.C, -self.sign * identity])
+                    h = np.hstack([self.d, zeros_vec])
+                else:
+                    G = self.C
+                    h = self.d
+
+                # TODO: implement more solvers in phase on
+                # Although this might not be needed since it usually runs very few iterations
+                if linear_solve_method == "cg":
+                    linear_solver = "cg"
+                else:
+                    linear_solver = "solve"
+
+                PhaseOne = PhaseOneSolver(
+                    G,
+                    h,
+                    mu,
+                    x0=self.x,
+                    eps=inner_epsilon,
+                    max_iter_interior=max_outer_iters,
+                    max_iter_newton=max_inner_iters,
+                    use_cupy=use_gpu,
+                    linear_solver=linear_solver,
+                    max_cg_iters=max_cg_iters,
+                )
+                self.x, s, warn = PhaseOne.solve()
+
+                if not warn and s > 0:
+                    # This mean infeasibility
+                    # TODO: Come up with what we do then
+                    pass
+
+                del PhaseOne  # Delete object since it is no longer needed
 
         # If specified, make sure that the problem is feasible usign CVXPY
         # the CVXPY solution can also be used later to verify the solution of the LinearSolver
@@ -466,7 +509,7 @@ class LPSolver:
             prob.solve(solver="CLARABEL")
         except Exception as e:
             print(e)
-            
+
         return prob.status, prob.value
 
     def __str__(self):
@@ -502,45 +545,6 @@ class LPSolver:
 
         x = kwargs.get("x0", self.x)
 
-        # Have an intial x
-        if self.A is not None and self.b is not None:
-          if (self.A @ x <= self.b).all():
-            # Good point
-            pass
-          else:
-            # Need to find a feasible point
-            # Create needed matrices if sign is not 0
-            if self.sign != 0:
-              identity = np.eye(self.n)
-              zeros_vec = np.zeros(self.n)
-              
-              G = np.vstack([self.A, - self.sign * identity])
-              h = np.hstack([self.b, zeros_vec])
-            else:
-              G = self.A
-              h = self.b
-            
-            # TODO: implement more solvers in phase on
-            # Although this might not be needed since it usually runs very few iterations
-            if self.linear_solve_method == 'cg':
-              linear_solver = "cg"
-            else:
-              linear_solver = "solve"
-            
-            PhaseOne = phase_one(G, h, self.mu, x0 = x, eps = self.epsilon, 
-                                max_iter_interior = self.max_outer_iters, 
-                                max_iter_newton = self.max_inner_iters,
-                                use_cupy = self.use_gpu, linear_solver = 'cg',
-                                max_cg_iters = self.max_cg_iters)
-            x, s, warn = PhaseOne.solve()
-            
-            if not warn and s > 0:
-              # This mean infeasibility
-              # TODO: Come up with what we do then
-              pass
-
-            del PhaseOne # Delete object since it is no longer needed
-
         self.__check_x0(x)
 
         self.outer_iters = 0
@@ -565,54 +569,59 @@ class LPSolver:
 
             x, v, numiters_t, _ = self.ns.solve(x, t, v0=v)
 
-            obj_val = self.fm.objective(x)
-            if obj_val < best_obj:
-                best_obj = obj_val
-                best_x = x
-            if self.track_loss:
-                objective_vals.append(obj_val)
-
             self.outer_iters += 1
             self.inner_iters.append(numiters_t)
 
-            if not self.suppress_print and numiters_t <= self.max_inner_iters:
-                print(
-                    f"Reached max Newton steps during {iter}th centering step (t={t})"
-                )
+            obj_val = self.fm.objective(x)
+            if self.track_loss:
+                objective_vals.append(obj_val)
+            if obj_val < best_obj:
+                best_obj = obj_val
+                best_x = x.copy()
+            else:
+                break
+
+            if numiters_t >= self.max_inner_iters:
+                if not self.suppress_print:
+                    print(
+                        f"Reached max Newton steps during {iter}th centering step (t={t})"
+                    )
 
             dual_gap = self.n / t
             # alg_progress = np.hstack([alg_progress, np.array([num_iters_t, dual_gap]).reshape(2,1)])
 
             # quit if n/t < epsilon
             if dual_gap < self.epsilon:
-                self.xstar = best_x
-                if self.C is not None:
-                    if self.sign != 0:
-                        if self.use_gpu:
-                            self.lam_star = cp.append(
-                                1 / (t * (x)), 1 / (t * (self.d - self.C @ best_x))
-                            )
-                        else:
-                            self.lam_star = np.append(
-                                1 / (t * (x)), 1 / (t * (self.d - self.C @ best_x))
-                            )
-                    else:
-                        self.lam_star = 1 / (t * (self.d - self.C @ best_x))
-                elif self.sign != 0:
-                    self.lam_star = 1 / (t * (best_x))
-                if self.A is not None:
-                    self.v_star = v / t
-
-                self.optimal = True
-                self.value = best_obj
-                self.optimality_gap = dual_gap
-                self.objective_vals = objective_vals
-
-                return self.value
+                break
 
             # increment t for next outer iteration
             t = min(t * self.mu, (self.n + 1.0) / self.epsilon)
             self.fm.update_t(t)
+
+        self.xstar = best_x
+        if self.C is not None:
+            if self.sign != 0:
+                if self.use_gpu:
+                    self.lam_star = cp.append(
+                        1 / (t * (best_x)), 1 / (t * (self.d - self.C @ best_x))
+                    )
+                else:
+                    self.lam_star = np.append(
+                        1 / (t * (best_x)), 1 / (t * (self.d - self.C @ best_x))
+                    )
+            else:
+                self.lam_star = 1 / (t * (self.d - self.C @ best_x))
+        elif self.sign != 0:
+            self.lam_star = 1 / (t * (best_x))
+        if self.A is not None:
+            self.v_star = v / t
+
+        self.optimal = True
+        self.value = best_obj
+        self.optimality_gap = dual_gap
+        self.objective_vals = objective_vals
+
+        return self.value
 
     def __check_x0(self, x):
         """Helper function to ensure initial x is in the domain of the problem
