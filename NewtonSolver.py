@@ -15,12 +15,13 @@ class NewtonSolver:
 
     def __init__(
         self,
-        A,
-        b,
-        C,
-        d,
-        function_manager,
-        sign=1,
+        A=None,
+        b=None,
+        C=None,
+        d=None,
+        function_manager=None,
+        lower_bound=None,
+        upper_bound=None,
         max_iters=50,
         epsilon=1e-5,
         suppress_print=True,
@@ -30,6 +31,9 @@ class NewtonSolver:
         mu=20,
         use_gpu=False,
         track_loss=False,
+        phase1_flag=False,
+        phase1_tol=0.1,
+        use_psd_condition=False,
     ):
         """Solve convex optimization problem of the following form using Newton's method:
         argmin_x  t * obj_fxn(x)
@@ -46,12 +50,13 @@ class NewtonSolver:
         """
 
         # problem specifications
-        # A and b included only for consistency with the Infeaisble Start Solver, they are not used
+        # A and b and normed constraints included only for consistency with the Infeaisble Start Solver, they are not used
         self.A = A
         self.b = b
         self.C = C
         self.d = d
-        self.sign = sign
+        self.lb = lower_bound
+        self.ub = upper_bound
 
         # problem functions for solve method
         self.fm = function_manager
@@ -66,6 +71,9 @@ class NewtonSolver:
         self.mu = mu
         self.use_gpu = use_gpu and gpu_flag
         self.track_loss = track_loss
+        self.phase1_flag = phase1_flag
+        self.phase1_tol = phase1_tol
+        self.use_psd_condition = use_psd_condition
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values
@@ -91,6 +99,10 @@ class NewtonSolver:
 
                 # update x and nu based on newton solve
                 x += step_size * xstep
+                self.fm.update_x(x)
+                if self.phase1_flag:
+                    if x[-1] < -self.phase1_tol:
+                        return x, None, iter + 1, None
 
                 # check stopping criteria
                 # residuals = np.hstack(
@@ -112,8 +124,8 @@ class NewtonSolver:
                 #    residual_norm2 = np.linalg.norm(r)
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
-                nd = -gradf.T @ xstep / 2
-                if step_size < 1e-15 or nd < self.eps:
+                nd = -gradf.dot(xstep) / 2
+                if step_size < 1e-10 or nd < self.eps:
                     return x, None, iter + 1, nd
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
@@ -147,30 +159,34 @@ class NewtonSolver:
 
         # default to step size of 1 -- can only get smaller
         step_size = 1
-        fx = self.fm.newton_objective(x)
+        fx = self.fm.newton_objective()
         next_x = x + step_size * xstep
-        grad_check = gradf.T @ x
+        grad_check = gradf.dot(x)
 
         # make sure our next step is in the domain of f
 
-        if self.sign > 0:
-            while (next_x <= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
-        elif self.sign < 0:
-            while (next_x >= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
-        if self.C is not None:
-            while (self.d - self.C @ next_x <= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
-
-        while (
-            self.fm.newton_objective(next_x) > fx + self.alpha * step_size * grad_check
-        ):
-            next_x = x + step_size * xstep
+        self.fm.update_x(next_x)
+        while (self.fm.slacks < 0).any():
             step_size *= self.beta
+            if step_size < 1e-20:
+                if not self.suppress_print:
+                    print(
+                        "Backtracking search got stuck, returning from Newton's method now..."
+                    )
+                return step_size
+            next_x = x + step_size * xstep
+            self.fm.update_x(next_x)
+
+        while self.fm.newton_objective() > fx + self.alpha * step_size * grad_check:
+            next_x = x + step_size * xstep
+            if step_size < 1e-20:
+                if not self.suppress_print:
+                    print(
+                        "Backtracking search got stuck, returning from Newton's method now..."
+                    )
+                return step_size
+            step_size *= self.beta
+            self.fm.update_x(next_x)
 
         return step_size
 
@@ -189,7 +205,7 @@ class NewtonSolverNPLstSq(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
         g = gradf
-        H = self.fm.hessian(x)
+        H = self.fm.hessian()
         if self.use_gpu:
             xstep = cp.linalg.lstsq(H, -gradf, rcond=None)[0]
         else:
@@ -208,7 +224,7 @@ class NewtonSolverNPSolve(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H = self.fm.hessian(x)
+        H = self.fm.hessian()
 
         if self.use_gpu:
             xstep = cp.linalg.solve(H, -gradf)
@@ -229,39 +245,85 @@ class NewtonSolverCholesky(NewtonSolver):
     On GPU, must first calculate cholesky decomp (G = L L^T) and
     then solve two subsequent linear solves (x = L^-T L^-1 y)"""
 
+    def __init__(self, *args, **kwargs):
+        #    use_psd_condition = kwargs.pop("use_psd_conditioning", False)
+        #   self.use_psd_condition = use_psd_condition
+
+        super().__init__(*args, **kwargs)
+        self.use_backup = False
+
+    def add_psd_conditioning(self, M):
+        if self.use_gpu:
+            diag = cp.einsum("ii->i", M)
+        else:
+            diag = np.einsum("ii->i", M)
+        diag += 1e-9
+        return M
+
     def newton_linear_solve(self, x, gradf):
 
-        H = self.fm.hessian(x)
-        if self.use_gpu:
-            L = cp.linalg.cholesky(H)
-            xstep = solve_triangular(
-                L.T,
-                solve_triangular(
-                    L,
-                    -gradf,
-                    lower=True,
-                    overwrite_b=False,
-                    check_finite=False,
-                ),
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
+        H = self.fm.hessian()
+
+        if not self.use_backup:
+            try:
+                if self.use_psd_condition:
+                    H = self.add_psd_conditioning(H)
+                if self.use_gpu:
+                    L = cp.linalg.cholesky(H)
+                    xstep = solve_triangular(
+                        L.T,
+                        solve_triangular(
+                            L,
+                            -gradf,
+                            lower=True,
+                            overwrite_b=False,
+                            check_finite=False,
+                        ),
+                        lower=False,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+
+                else:
+
+                    L, low_flag = scipy.linalg.cho_factor(
+                        H,
+                        overwrite_a=True,
+                        check_finite=False,
+                    )
+                    xstep = scipy.linalg.cho_solve(
+                        (L, low_flag),
+                        -gradf,
+                        overwrite_b=True,
+                        check_finite=False,
+                    )
+            except np.linalg.LinAlgError:
+                if not self.suppress_print:
+                    print(
+                        "Cholesky solver failed due to numeric instability. Proceeding with Numpy solve..."
+                    )
+                self.use_backup = True
+                xstep = self.backup_solve(x, gradf, H=H)
+            except cp.linalg.LinAlgError:
+                if not self.suppress_print:
+                    print(
+                        "Cholesky solver failed due to numeric instability. Proceeding with Numpy solve..."
+                    )
+                self.use_backup = True
+                xstep = self.backup_solve(x, gradf, H=H)
 
         else:
+            xstep = self.backup_solve(x, gradf, H=H)
 
-            L, low_flag = scipy.linalg.cho_factor(
-                H,
-                overwrite_a=True,
-                check_finite=False,
-            )
-            xstep = scipy.linalg.cho_solve(
-                (L, low_flag),
-                -gradf,
-                overwrite_b=True,
-                check_finite=False,
-            )
+        return xstep
 
+    def backup_solve(self, x, gradf, H=None):
+        if H is None:
+            H = self.fm.hessian()
+        if self.use_gpu:
+            xstep = cp.linalg.solve(H, -gradf)
+        else:
+            xstep = np.linalg.solve(H, -gradf)
         return xstep
 
 
@@ -276,13 +338,13 @@ class NewtonSolverDirect(NewtonSolver):
     """
 
     def newton_linear_solve(self, x, gradf):
-        H = self.fm.hessian(x)
+        H = self.fm.hessian()
         if self.use_gpu:
             H_inv = cp.linalg.inv(H)
-            xstep = H_inv @ -gradf
+            xstep = cp.matmul(H_inv, -gradf)
         else:
             H_inv = np.linalg.inv(H)
-            xstep = H_inv @ -gradf
+            xstep = np.matmul(H_inv, -gradf)
         return xstep
 
 
@@ -298,7 +360,7 @@ class NewtonSolverCG(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H = self.hessian(x)
+        H = self.fm.hessian()
 
         descent_check = np.dot(x, gradf)
         if descent_check < 0:
@@ -338,7 +400,7 @@ class NewtonSolverDiagonal(NewtonSolver):
 
     def newton_linear_solve(self, x, gradf):
 
-        H_inv = self.fm.inv_hessian(x)
+        H_inv = self.fm.inv_hessian()
         xstep = -H_inv * gradf
 
         return xstep

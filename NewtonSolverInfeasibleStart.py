@@ -19,7 +19,8 @@ class NewtonSolverInfeasibleStart:
         C,
         d,
         function_manager,
-        sign=1,
+        lower_bound=None,
+        upper_bound=None,
         max_iters=50,
         epsilon=1e-5,
         suppress_print=True,
@@ -29,6 +30,7 @@ class NewtonSolverInfeasibleStart:
         mu=20,
         use_gpu=False,
         track_loss=False,
+        use_psd_condition=False,
     ):
         """Solve convex optimization problem of the following form using infeasible start Newton's method:
         argmin_x  t * obj_fxn(x)
@@ -47,7 +49,8 @@ class NewtonSolverInfeasibleStart:
         self.b = b
         self.C = C
         self.d = d
-        self.sign = sign
+        self.lb = lower_bound
+        self.ub = upper_bound
 
         # problem functions for solve method
         self.fm = function_manager
@@ -62,6 +65,7 @@ class NewtonSolverInfeasibleStart:
         self.mu = mu
         self.use_gpu = use_gpu and gpu_flag
         self.track_loss = track_loss
+        self.use_psd_condition = use_psd_condition
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values
@@ -82,14 +86,15 @@ class NewtonSolverInfeasibleStart:
         #    * np.ones((1, len(x) + self.A.shape[0]))
         # ).T
 
-        # precompute gradient since it will be used in multiple locations
-        gradf = self.fm.gradient(x)
         residual_norm = None
 
         # place everything in a try-except block so we can report if there was an error during solve
         try:
 
             for iter in range(self.max_iters):
+
+                # precompute gradient since it will be used in multiple locations
+                gradf = self.fm.gradient(x)
 
                 # invoke linear solve method -- needs to be implemented by a child class
                 xstep, vstep = self.newton_linear_solve(x, v, gradf)
@@ -103,6 +108,7 @@ class NewtonSolverInfeasibleStart:
                 # update x and nu based on newton solve
                 x += step_size * xstep
                 v += step_size * vstep
+                self.fm.update_x(x)
 
                 # check stopping criteria
                 # residuals = np.hstack(
@@ -124,7 +130,7 @@ class NewtonSolverInfeasibleStart:
                 #    residual_norm2 = np.linalg.norm(r)
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
-                if residual_norm < self.eps:
+                if step_size < 1e-13 or residual_norm < self.eps:
                     return x, v, iter + 1, residual_norm
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
@@ -149,7 +155,6 @@ class NewtonSolverInfeasibleStart:
                 return x, v, iter + 1, residual_norm
 
         except np.linalg.LinAlgError as e:
-            print("running")
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
             return x, v, iter + 1, residual_norm
@@ -170,24 +175,27 @@ class NewtonSolverInfeasibleStart:
         next_x = x + step_size * xstep
 
         # make sure our next step is in the domain of f
-        if self.sign > 0:
-            while (next_x <= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
-        elif self.sign < 0:
-            while (next_x >= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
-        if self.C is not None:
-            while (self.d - self.C @ next_x <= 0).any():
-                step_size *= self.beta
-                next_x = x + step_size * xstep
+        self.fm.update_x(next_x)
+        while (self.fm.slacks < 0).any():
+            step_size *= self.beta
+            if step_size < 1e-20:
+                if not self.suppress_print:
+                    print("Backtracking search got stuck, returning from Newton's method now...")
+                return step_size, None, None
+            next_x = x + step_size * xstep
+            self.fm.update_x(next_x)
 
         # capture results of some matrix multiplies so we don't do repeated calculations
-        ATv_cache = self.A.T @ v
-        ATvstep_cache = self.A.T @ vstep
-        Axb_cache = self.A @ x - self.b
-        Axstep_cache = self.A @ xstep
+        if self.use_gpu:
+            ATv_cache = cp.matmul(self.A.T, v)
+            ATvstep_cache = cp.matmul(self.A.T, vstep)
+            Axb_cache = cp.matmul(self.A, x) - self.b
+            Axstep_cache = cp.matmul(self.A, xstep)
+        else:
+            ATv_cache = np.matmul(self.A.T, v)
+            ATvstep_cache = np.matmul(self.A.T, vstep)
+            Axb_cache = np.matmul(self.A, x) - self.b
+            Axstep_cache = np.matmul(self.A, xstep)
 
         # calculate residuals for current step (only if not provided with residual from last iteration)
         # TODO: Was getting some weird behavior trying to use the cached residual norm, can try to fix if we
@@ -203,7 +211,7 @@ class NewtonSolverInfeasibleStart:
             residual_norm = np.linalg.norm(r)
 
         # calculate residuals for proposed step
-        next_grad = self.fm.gradient(x + step_size * xstep)
+        next_grad = self.fm.gradient()
         rnext_dual = next_grad + ATv_cache + step_size * ATvstep_cache
         rnext_primal = Axb_cache + step_size * Axstep_cache
         if self.use_gpu:
@@ -222,7 +230,12 @@ class NewtonSolverInfeasibleStart:
         # make sure the residual is descending enough
         while next_residual_norm > (1 - self.alpha * step_size) * residual_norm:
             step_size *= self.beta
-            next_grad = self.fm.gradient(x + step_size * xstep)
+            if step_size < 1e-20:
+                if not self.suppress_print:
+                    print("Backtracking search got stuck, returning from Newton's method now...")
+                break
+            next_x = x + step_size * xstep
+            next_grad = self.fm.gradient(next_x)
             rnext_dual = next_grad + ATv_cache + step_size * ATvstep_cache
             rnext_primal = Axb_cache + step_size * Axstep_cache
             if self.use_gpu:
@@ -257,25 +270,26 @@ class NewtonSolverNPLstSqInfeasibleStart(NewtonSolverInfeasibleStart):
 
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
-        b2 = self.A @ x - self.b
-        A11 = self.fm.hessian(x)
+        A11 = self.fm.hessian()
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
+            b2 = cp.matmul(self.A, x) - self.b
             A11_inv_AT = cp.linalg.lstsq(A11, self.A.T, rcond=None)[0]
             A11_inv_b1 = cp.linalg.lstsq(A11, b1, rcond=None)[0]
             w = cp.linalg.lstsq(
-                self.A @ (A11_inv_AT),
-                b2 - self.A @ (A11_inv_b1),
+                cp.matmul(self.A, (A11_inv_AT)),
+                b2 - cp.matmul(self.A, (A11_inv_b1)),
                 rcond=None,
             )[0]
             xstep = -cp.linalg.lstsq(A11, (b1 + self.A.T @ w), rcond=None)[0]
         else:
+            b2 = np.matmul(self.A, x) - self.b
             A11_inv_AT = np.linalg.lstsq(A11, self.A.T, rcond=None)[0]
             A11_inv_b1 = np.linalg.lstsq(A11, b1, rcond=None)[0]
             w = np.linalg.lstsq(
-                self.A @ (A11_inv_AT),
-                b2 - self.A @ (A11_inv_b1),
+                np.matmul(self.A, A11_inv_AT),
+                b2 - np.matmul(self.A, A11_inv_b1),
                 rcond=None,
             )[0]
             xstep = -np.linalg.lstsq(A11, (b1 + self.A.T @ w), rcond=None)[0]
@@ -296,21 +310,25 @@ class NewtonSolverNPSolveInfeasibleStart(NewtonSolverInfeasibleStart):
 
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
-        b2 = self.A @ x - self.b
-        A11 = self.fm.hessian(x)
+        A11 = self.fm.hessian()
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
+            b2 = cp.matmul(self.A, x) - self.b
             A11_inv_AT = cp.linalg.solve(A11, self.A.T)
             A11_inv_b1 = cp.linalg.solve(A11, b1)
-            w = cp.linalg.solve(self.A @ (A11_inv_AT), b2 - self.A @ (A11_inv_b1))
-            xstep = -cp.linalg.solve(A11, (b1 + self.A.T @ w))
+            w = cp.linalg.solve(
+                cp.matmul(self.A, (A11_inv_AT)), b2 - cp.matmul(self.A, A11_inv_b1)
+            )
+            xstep = -cp.linalg.solve(A11, (b1 + cp.matmul(self.A.T, w)))
         else:
-
+            b2 = np.matmul(self.A, x) - self.b
             A11_inv_AT = np.linalg.solve(A11, self.A.T)
             A11_inv_b1 = np.linalg.solve(A11, b1)
-            w = np.linalg.solve(self.A @ (A11_inv_AT), b2 - self.A @ (A11_inv_b1))
-            xstep = -np.linalg.solve(A11, (b1 + self.A.T @ w))
+            w = np.linalg.solve(
+                np.matmul(self.A, (A11_inv_AT)), b2 - np.matmul(self.A, A11_inv_b1)
+            )
+            xstep = -np.linalg.solve(A11, (b1 + np.matmul(self.A.T, w)))
         vstep = w - v
 
         return xstep, vstep
@@ -331,111 +349,174 @@ class NewtonSolverCholeskyInfeasibleStart(NewtonSolverInfeasibleStart):
     On GPU, must first calculate cholesky decomp (G = L L^T) and
     then solve two subsequent linear solves (x = L^-T L^-1 y)"""
 
+    def __init__(self, *args, **kwargs):
+        #    use_psd_condition = kwargs.pop("use_psd_conditioning", False)
+        #   self.use_psd_condition = use_psd_condition
+
+        super().__init__(*args, **kwargs)
+        self.use_backup = False
+
+    def add_psd_conditioning(self, M):
+        if self.use_gpu:
+            diag = cp.einsum("ii->i", M)
+        else:
+            diag = np.einsum("ii->i", M)
+        diag += 1e-9
+        return M
+
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
-        b2 = self.A @ x - self.b
-        A11 = self.fm.hessian(x)
+        A11 = self.fm.hessian()
         if A11.ndim < 2:
             A11 = np.diag(A11)
-        if self.use_gpu:
 
-            L1 = cp.linalg.cholesky(A11)
-            A11_inv_AT = solve_triangular(
-                L1.T,
-                solve_triangular(
-                    L1,
-                    self.A.T,
-                    lower=True,
-                    overwrite_b=False,
-                    check_finite=False,
-                ),
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
-            A11_inv_b1 = solve_triangular(
-                L1.T,
-                solve_triangular(
-                    L1,
-                    b1,
-                    lower=True,
-                    overwrite_b=False,
-                    check_finite=False,
-                ),
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
+        if not self.use_backup:
+            try:
+                if self.use_psd_condition:
+                    A11 = self.add_psd_conditioning(A11)
+                if self.use_gpu:
+                    b2 = cp.matmul(self.A, x) - self.b
+                    L1 = cp.linalg.cholesky(A11)
+                    A11_inv_AT = solve_triangular(
+                        L1.T,
+                        solve_triangular(
+                            L1,
+                            self.A.T,
+                            lower=True,
+                            overwrite_b=False,
+                            check_finite=False,
+                        ),
+                        lower=False,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+                    A11_inv_b1 = solve_triangular(
+                        L1.T,
+                        solve_triangular(
+                            L1,
+                            b1,
+                            lower=True,
+                            overwrite_b=False,
+                            check_finite=False,
+                        ),
+                        lower=False,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
 
-            L = cp.linalg.cholesky(self.A @ (A11_inv_AT))
-            w = solve_triangular(
-                L.T,
-                solve_triangular(
-                    L,
-                    b2 - self.A @ (A11_inv_b1),
-                    lower=True,
-                    overwrite_b=False,
-                    check_finite=False,
-                ),
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
-            xstep = -solve_triangular(
-                L1.T,
-                solve_triangular(
-                    L1,
-                    b1 + self.A.T @ w,
-                    lower=True,
-                    overwrite_b=False,
-                    check_finite=False,
-                ),
-                lower=False,
-                overwrite_b=False,
-                check_finite=False,
-            )
+                    L = cp.linalg.cholesky(cp.matmul(self.A, A11_inv_AT))
+                    w = solve_triangular(
+                        L.T,
+                        solve_triangular(
+                            L,
+                            b2 - cp.matmul(self.A, A11_inv_b1),
+                            lower=True,
+                            overwrite_b=False,
+                            check_finite=False,
+                        ),
+                        lower=False,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+                    xstep = -solve_triangular(
+                        L1.T,
+                        solve_triangular(
+                            L1,
+                            b1 + cp.matmul(self.A.T, w),
+                            lower=True,
+                            overwrite_b=False,
+                            check_finite=False,
+                        ),
+                        lower=False,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+                else:
+                    b2 = np.matmul(self.A, x) - self.b
+                    L1 = scipy.linalg.cho_factor(
+                        A11,
+                        overwrite_a=False,
+                        check_finite=False,
+                    )
+                    A11_inv_AT = scipy.linalg.cho_solve(
+                        L1,
+                        self.A.T,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+                    A11_inv_b1 = scipy.linalg.cho_solve(
+                        L1,
+                        b1,
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+
+                    L, low_flag = scipy.linalg.cho_factor(
+                        np.matmul(self.A, A11_inv_AT),
+                        overwrite_a=False,
+                        check_finite=False,
+                    )
+                    w = scipy.linalg.cho_solve(
+                        (L, low_flag),
+                        b2 - np.matmul(self.A, A11_inv_b1),
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+
+                    xstep = -scipy.linalg.cho_solve(
+                        L1,
+                        b1 + np.matmul(self.A.T, w),
+                        overwrite_b=False,
+                        check_finite=False,
+                    )
+            except np.linalg.LinAlgError:
+                if not self.suppress_print:
+                    print(
+                        "Cholesky solver failed due to numeric instability. Proceeding with Numpy solve..."
+                    )
+                self.use_backup = True
+                xstep, w = self.backup_solve(x, v, gradf, A11=A11, b2=b2)
+            except cp.linalg.LinAlgError:
+                if not self.suppress_print:
+                    print(
+                        "Cholesky solver failed due to numeric instability. Proceeding with Numpy solve..."
+                    )
+                self.use_backup = True
+                xstep, w = self.backup_solve(x, v, gradf, A11=A11, b2=b2)
+
         else:
-
-            L1 = scipy.linalg.cho_factor(
-                A11,
-                overwrite_a=False,
-                check_finite=False,
-            )
-            A11_inv_AT = scipy.linalg.cho_solve(
-                L1,
-                self.A.T,
-                overwrite_b=False,
-                check_finite=False,
-            )
-            A11_inv_b1 = scipy.linalg.cho_solve(
-                L1,
-                b1,
-                overwrite_b=False,
-                check_finite=False,
-            )
-
-            L, low_flag = scipy.linalg.cho_factor(
-                self.A @ (A11_inv_AT),
-                overwrite_a=False,
-                check_finite=False,
-            )
-            w = scipy.linalg.cho_solve(
-                (L, low_flag),
-                b2 - self.A @ (A11_inv_b1),
-                overwrite_b=False,
-                check_finite=False,
-            )
-
-            xstep = -scipy.linalg.cho_solve(
-                L1,
-                b1 + self.A.T @ w,
-                overwrite_b=False,
-                check_finite=False,
-            )
+            xstep, w = self.backup_solve(x, v, gradf, A11=A11)
 
         vstep = w - v
 
         return xstep, vstep
+
+    def backup_solve(self, x, v, gradf, A11=None, b2=None):
+        b1 = gradf
+        if A11 is None:
+            A11 = self.fm.hessian()
+        if A11.ndim < 2:
+            A11 = np.diag(A11)
+        if self.use_gpu:
+            if b2 is None:
+                b2 = cp.matmul(self.A, x) - self.b
+            A11_inv_AT = cp.linalg.solve(A11, self.A.T)
+            A11_inv_b1 = cp.linalg.solve(A11, b1)
+            w = cp.linalg.solve(
+                cp.matmul(self.A, (A11_inv_AT)), b2 - cp.matmul(self.A, A11_inv_b1)
+            )
+            xstep = -cp.linalg.solve(A11, (b1 + cp.matmul(self.A.T, w)))
+        else:
+            if b2 is None:
+                b2 = np.matmul(self.A, x) - self.b
+            A11_inv_AT = np.linalg.solve(A11, self.A.T)
+            A11_inv_b1 = np.linalg.solve(A11, b1)
+            w = np.linalg.solve(
+                np.matmul(self.A, (A11_inv_AT)), b2 - np.matmul(self.A, A11_inv_b1)
+            )
+            xstep = -np.linalg.solve(A11, (b1 + np.matmul(self.A.T, w)))
+
+        return xstep, w
 
 
 class NewtonSolverDirectInfeasibleStart(NewtonSolverInfeasibleStart):
@@ -453,7 +534,7 @@ class NewtonSolverDirectInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.fm.hessian(x)
+        A11 = self.fm.hessian()
         if A11.ndim < 2:
             A11 = np.diag(A11)
         if self.use_gpu:
@@ -534,7 +615,7 @@ class NewtonSolverCGInfeasibleStart(NewtonSolverInfeasibleStart):
 
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11 = self.fm.hessian(x)
+        A11 = self.fm.hessian()
         if A11.ndim < 2:
             A11 = np.diag(A11)
 
@@ -579,7 +660,7 @@ class NewtonSolverKKTNPSolveInfeasibleStart(NewtonSolverInfeasibleStart):
         r = np.append(r_dual, r_primal)
         M = np.bmat(
             [
-                [np.diag(self.fm.hessian(x)), self.A.T],
+                [np.diag(self.fm.hessian()), self.A.T],
                 [self.A, np.zeros((self.A.shape[0], self.A.shape[0]))],
             ]
         )
@@ -605,7 +686,7 @@ class NewtonSolverNPLstSqDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.fm.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian()
         if self.use_gpu:
             w = cp.linalg.lstsq(
                 self.A @ (A11_inv[:, None] * self.A.T),
@@ -639,7 +720,7 @@ class NewtonSolverNPSolveDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.fm.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian()
         if self.use_gpu:
             w = cp.linalg.solve(
                 self.A @ (A11_inv[:, None] * self.A.T), b2 - self.A @ (A11_inv * b1)
@@ -674,7 +755,7 @@ class NewtonSolverCholeskyDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.fm.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian()
         if self.use_gpu:
 
             L = cp.linalg.cholesky(self.A @ (A11_inv[:, None] * self.A.T))
@@ -726,7 +807,7 @@ class NewtonSolverDirectDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
     def newton_linear_solve(self, x, v, gradf):
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.fm.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian()
         if self.use_gpu:
             KKT_inv = cp.linalg.inv(self.A @ (A11_inv[:, None] * self.A.T))
         else:
@@ -804,7 +885,7 @@ class NewtonSolverCGDiagonalInfeasibleStart(NewtonSolverInfeasibleStart):
 
         b1 = gradf
         b2 = self.A @ x - self.b
-        A11_inv = self.fm.inv_hessian(x)
+        A11_inv = self.fm.inv_hessian()
 
         # get initial x for conjugate gradient
         # TODO: WRITE A CHECK TO GET AN INITIAL W FOR CONJUGATE GRADIENT
@@ -846,7 +927,7 @@ class NewtonSolverKKTNPSolveDiagonalInfeasibleStart(NewtonSolverInfeasibleStart)
         r = np.append(r_dual, r_primal)
         M = np.bmat(
             [
-                [np.diag(self.fm.hessian(x)), self.A.T],
+                [np.diag(self.fm.hessian()), self.A.T],
                 [self.A, np.zeros((self.A.shape[0], self.A.shape[0]))],
             ]
         )

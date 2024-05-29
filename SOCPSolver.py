@@ -15,24 +15,28 @@ except Exception:
     print("Not able to run with GPU")
 
 
-class LPSolver:
+class SOCPSolver:
 
     def __init__(
         self,
-        c=None,
+        P=None,
+        q=None,
         A=None,
         b=None,
-        C=None,
+        c=None,
         d=None,
+        F=None,
+        g=None,
         lower_bound=0,
         upper_bound=None,
         t0=0.1,
+        phase1_t0=0.01,
         max_outer_iters=50,
         max_inner_iters=20,
         epsilon=1e-8,
         inner_epsilon=1e-5,
         check_cvxpy=True,
-        linear_solve_method="np_solve",
+        linear_solve_method="cholesky",
         max_cg_iters=50,
         alpha=0.2,
         beta=0.6,
@@ -43,14 +47,15 @@ class LPSolver:
         track_loss=False,
         get_dual_variables=False,
         phase1_tol=0,
-        phase1_t0=0.01,
+        use_psd_condition=False,
         x0=None,
     ):
         """Initialize LP problem of form:
-        Minimize c^T x
-        Subject to Ax == b
-                   Cx <= d
-                   lower_bound <= x <= upper_bound
+        Minimize 1/2 x^T P x + q^T x
+        Subject to ||Ax+b|| <= c^T x + d
+                   Fx == g
+
+        with f in R^n, A in R^(mxn), b in R^m, c in R^n, d in R, F in R^(pxn), g in R^p, and x in R^n
 
         The remaining parameters:
             sign (default 1): Used to set the sign of x (sign=1 to make x positive, sign=-1 to make x negative, sign=0 if unconstrained on sign)
@@ -86,28 +91,43 @@ class LPSolver:
                                     really no cost if its not, so recommended to keep as True
         """
 
+        self.use_gpu = use_gpu and gpu_flag
+
         # all attributes for LP
+        self.P = P
+        self.q = q
         self.A = A
+        self.b = b
         self.c = c
-        self.C = C
         self.b = b
         self.d = d
+        self.F = F
+        self.g = g
         self.lb = lower_bound
         self.ub = upper_bound
 
         self.__check_inputs()
 
-        self.equality_constrained = self.A is not None
+        self.equality_constrained = self.F is not None
+        self.inequality_constrained = self.A is not None
+        if not self.inequality_constrained:
+            raise ValueError(
+                "No cone contraints detected. Run with LPSolver or QPSolver for better performance."
+            )
 
         # initialize x
         # TODO: when using inequality constraints, will need to find a way to get a feasible point
         # (using Phase I methods?)
-        if self.c is not None:
-            self.n = len(self.c)
+        if self.q is not None:
+            self.n = len(self.q)
+        elif self.P is not None:
+            self.n = self.P.shape[1]
         elif self.A is not None:
-            self.n = self.A.shape[1]
-        elif self.C is not None:
-            self.n = self.C.shape[1]
+            self.n = self.A[0].shape[1]
+        elif self.F is not None:
+            self.n = self.F.shape[1]
+        elif self.c is not None:
+            self.n = len(self.c[0])
 
         self.x = x0
 
@@ -140,19 +160,25 @@ class LPSolver:
 
         # transfer to GPU if specified to use GPU (and we are able to given available hardware)
         # TODO: Be able to break into smaller subproblems if not everything can fit onto GPU at the same time
-        self.use_gpu = use_gpu and gpu_flag
+
         if self.use_gpu:
             self.x = cp.array(self.x)
             if self.A is not None:
                 self.A = cp.array(self.A)
-            if self.c is not None:
-                self.c = cp.array(self.c)
-            if self.C is not None:
-                self.C = cp.array(self.C)
+            if self.P is not None:
+                self.P = cp.array(self.P)
+            if self.q is not None:
+                self.q = cp.array(self.q)
+            if self.F is not None:
+                self.F = cp.array(self.F)
             if self.b is not None:
                 self.b = cp.array(self.b)
             if self.d is not None:
                 self.d = cp.array(self.d)
+            if self.c is not None:
+                self.c = cp.array(self.c)
+            if self.g is not None:
+                self.g = cp.array(self.g)
             if self.lb is not None:
                 self.lb = cp.array(self.lb)
             if self.ub is not None:
@@ -160,8 +186,8 @@ class LPSolver:
 
         # Count the number of inequality constraints (used to determine optimality gap during solve)
         self.num_constraints = 0
-        if self.d is not None:
-            self.num_constraints += len(self.d)
+        if self.A is not None:
+            self.num_constraints += len(self.A)
         if self.lb is not None:
             self.num_constraints += self.n
         if self.ub is not None:
@@ -173,6 +199,7 @@ class LPSolver:
 
         # initializations for interior point method
         self.t0 = t0
+        self.phase1_t0 = phase1_t0
         self.mu = mu
         self.outer_iters = 0
         self.inner_iters = []
@@ -191,14 +218,13 @@ class LPSolver:
         self.lam_star = None
         self.vstar = None
         self.suppress_print = suppress_print
-        self.try_diag = try_diag
         self.track_loss = track_loss
         self.linear_solve_method = linear_solve_method
         self.get_dual_variables = get_dual_variables
-        self.phase1_t0 = phase1_t0
+        self.use_psd_condition = use_psd_condition
 
         # initialize the newton solver for this problem
-        if self.C is not None:
+        if self.A is not None:
             self.phase1_solver = self.__make_phase1_solver(phase1_tol)
         self.fm = self.__get_function_manager()
         self.ns = self.__get_newton_solver(linear_solve_method)
@@ -209,44 +235,128 @@ class LPSolver:
         If C or d is specified then both must be specified
         """
 
-        c_flag = self.c is not None
-        if c_flag:
-            if self.c.ndim != 1:
-                raise ValueError("c must be 1-dimensional!")
+        P_flag = self.P is not None
+        if P_flag:
+            if self.P.ndim != 2:
+                raise ValueError("P must be 2-dimensional!")
+            if self.P.shape[0] != self.P.shape[1]:
+                raise ValueError("P must be a symmetric, square PSD matrix!")
+        q_flag = self.q is not None
+        if q_flag:
+            if self.q.ndim != 1:
+                raise ValueError("q must be q-dimensional!")
+            if P_flag and self.P.shape[1] != len(self.q):
+                raise ValueError("P and q must have the same dimension")
 
         A_flag = self.A is not None
-        if bool(A_flag) ^ bool(self.b is not None):
-            raise ValueError("Both A and b must be defined, or neither!")
         if A_flag:
-            if self.A.ndim != 2:
-                raise ValueError("A must be 2-dimensional!")
-            m, n_A = self.A.shape
-            if self.b.ndim != 1:
-                raise ValueError("b must be 1-dimensional!")
-            if len(self.b) != m:
-                raise ValueError("A and b must have agreeing dimensions!")
-            if c_flag:
-                if len(self.c) != n_A:
-                    raise ValueError(
-                        "c must have the same number of entries as A has columns!"
-                    )
+            if not isinstance(self.A, list):
+                self.A = [self.A]
+            for i, A in enumerate(self.A):
+                if A.ndim > 2:
+                    raise ValueError("A must be 1- or 2-dimensional!")
 
-        C_flag = self.C is not None
-        if bool(C_flag) ^ bool(self.d is not None):
-            raise ValueError("Both C and d must be defined, or neither!")
-        if C_flag:
-            if self.C.ndim != 2:
-                raise ValueError("C must be 2-dimensional!")
-            m, n_C = self.C.shape
-            if self.d.ndim != 1:
-                raise ValueError("d must be 1-dimensional!")
-            if len(self.d) != m:
-                raise ValueError("C and d must have agreeing dimensions!")
-            if c_flag:
-                if len(self.c) != n_C:
+                if A.ndim == 2:
+                    m, n_A = A.shape
+
+                    # check for diagonality to see if we can compress (will lead to performance gains in solve function)
+                    diag_elem = np.diag(A).copy()
+                    np.fill_diagonal(A, 0)
+                    is_diag = (A == 0).all()
+                    if is_diag:
+                        self.A[i] = diag_elem
+                    else:
+                        np.fill_diagonal(a, diag_elem)
+
+                else:
+                    n_A = A.shape[0]
+                    m = n_A
+                if q_flag:
+                    if len(self.q) != n_A:
+                        raise ValueError(
+                            "q must have the same number of entries as A has columns!"
+                        )
+            b_flag = self.b is not None
+            if b_flag:
+                if not isinstance(self.b, list):
+                    self.b = [self.b]
+
+                for b in self.b:
+                    if b.ndim != 1:
+                        raise ValueError("b must be 1-dimensional!")
+                    if len(b) != m and not np.isscalar(b):
+                        raise ValueError("A and b must have agreeing dimensions!")
+
+                if len(self.b) == 1:
+                    self.b = self.b * len(self.A)
+                if len(self.A) != len(self.b):
+                    raise ValueError("Must provide an equal number of A and b")
+
+        F_flag = self.F is not None
+        if F_flag:
+            if self.F.ndim != 2:
+                raise ValueError("F must be 2-dimensional!")
+            m_F, n_F = self.F.shape
+            if q_flag:
+                if len(self.q) != n_F:
                     raise ValueError(
-                        "c must have the same number of entries as A has columns!"
+                        "q must have the same number of entries as F has columns!"
                     )
+        g_flag = self.g is not None
+        if g_flag:
+            if self.g.ndim != 1:
+                raise ValueError("g must be 1-dimensional!")
+            if F_flag:
+                if len(self.g) != m_F:
+                    raise ValueError("F and g must have agreeing dimensions!")
+
+        if F_flag and A_flag:
+            if n_F != n_A:
+                raise ValueError("A and F must have the same number of columns!")
+
+        c_flag = self.c is not None
+        if c_flag:
+            if not isinstance(self.c, list):
+                self.c = [self.c]
+            for c in self.c:
+                if c.ndim != 1:
+                    raise ValueError("c must be 1-dimensional!")
+                if q_flag:
+                    if len(c) != len(self.q):
+                        raise ValueError(
+                            "q and c must have the same number of entries!"
+                        )
+                if F_flag:
+                    if len(self.c[0]) != n_F:
+                        raise ValueError(
+                            "c must have the same number of entries as F has columns!"
+                        )
+                if A_flag:
+                    if len(self.c[0]) != n_A:
+                        raise ValueError(
+                            "c must have the same number of entries as A has columns!"
+                        )
+        d_flag = self.d is not None
+        if d_flag:
+            if not isinstance(self.d, list):
+                self.d = [self.d]
+            for d in self.d:
+                if not np.isscalar(d):
+                    raise ValueError("d must be a scalar!")
+
+        if d_flag and c_flag:
+            if len(self.d) != len(self.c):
+                raise ValueError("Must provide equal number of c and d")
+
+        if d_flag and A_flag:
+            if len(self.d) == 1:
+                self.d = self.d * len(self.A)
+            if len(self.d) != len(self.A):
+                raise ValueError("Must provide equal number of A and d")
+
+        if A_flag and c_flag:
+            if len(self.A) != len(self.c):
+                raise ValueError("Must provide equal number of c and A")
 
         lb_flag = self.lb is not None
         ub_flag = self.ub is not None
@@ -259,8 +369,8 @@ class LPSolver:
                 try:
                     if c_flag:
                         assert len(self.lb) == len(self.c)
-                    if C_flag:
-                        assert len(self.lb) == n_C
+                    if F_flag:
+                        assert len(self.lb) == n_F
                     if A_flag:
                         assert len(self.lb) == n_A
                 except AssertionError:
@@ -276,8 +386,8 @@ class LPSolver:
                 try:
                     if c_flag:
                         assert len(self.ub) == len(self.c)
-                    if C_flag:
-                        assert len(self.ub) == n_C
+                    if F_flag:
+                        assert len(self.ub) == n_F
                     if A_flag:
                         assert len(self.ub) == n_A
                 except AssertionError:
@@ -293,15 +403,11 @@ class LPSolver:
                 if diff < 0:
                     raise ValueError("Lower bound must be lower than upper bound")
 
-        if C_flag and A_flag:
-            if n_C != n_A:
-                raise ValueError("A and C must have the same number of columns!")
-
     def __make_phase1_solver(self, tol):
 
         phase1_solver = PhaseOneSolver(
-            C=self.C,
-            d=self.d,
+            socp=True,
+            socp_params=(self.A, self.b, self.c, self.d),
             lower_bound=self.lb,
             upper_bound=self.ub,
             x0=self.x,
@@ -319,6 +425,7 @@ class LPSolver:
             track_loss=self.track_loss,
             n=self.n,
             tol=tol,
+            use_psd_condition=self.use_psd_condition,
             t0=self.phase1_t0,
         )
 
@@ -330,19 +437,23 @@ class LPSolver:
         so that functions are as efficient as possible
         """
 
-        fm = FunctionManagerLP(
-            c=self.c,
+        # gradient and hessian of the objective
+
+        fm = FunctionManagerSOCP(
+            P=self.P,
+            q=self.q,
             A=self.A,
             b=self.b,
-            C=self.C,
+            c=self.c,
             d=self.d,
+            F=self.F,
+            g=self.g,
             x0=self.x,
-            lower_bound=self.lb,
-            upper_bound=self.ub,
+            # lower_bound=self.lb,
+            # upper_bound=self.ub,
             t=1,
             use_gpu=self.use_gpu,
             n=self.n,
-            try_diag=self.try_diag,
         )
 
         return fm
@@ -354,84 +465,55 @@ class LPSolver:
         """
 
         if linear_solve_method == "np_lstsq":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverNPLstSqInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverNPLstSq
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverNPLstSqInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverNPLstSqDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                NewtonClass = NewtonSolverNPLstSq
 
         elif linear_solve_method == "np_solve":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverNPSolveInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverNPSolve
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverNPSolveInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverNPSolveDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                NewtonClass = NewtonSolverNPSolve
+
         elif linear_solve_method == "direct":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverDirectInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDirect
+
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverDirectInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverDirectDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                NewtonClass = NewtonSolverDirect
+
         elif linear_solve_method == "cg":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverCGInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverCG
+
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverCGInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverCGDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                NewtonClass = NewtonSolverCG
 
         elif linear_solve_method == "kkt":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverKKTNPSolveInfeasibleStart
-                else:
-                    raise ValueError(
-                        "No KKT System non-equality-constrained problems! Please choose another solver"
-                    )
+
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverKKTNPSolveInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverKKTNPSolveDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                raise ValueError(
+                    "No KKT System non-equality-constrained problems! Please choose another solver"
+                )
+
         elif linear_solve_method == "cholesky":
-            if self.C is not None or not self.try_diag:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverCholeskyInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverCholesky
+
+            if self.equality_constrained:
+                NewtonClass = NewtonSolverCholeskyInfeasibleStart
             else:
-                if self.equality_constrained:
-                    NewtonClass = NewtonSolverCholeskyDiagonalInfeasibleStart
-                else:
-                    NewtonClass = NewtonSolverDiagonal
+                NewtonClass = NewtonSolverCholesky
         else:
             raise ValueError("Please enter a valid linear solve method!")
 
         ns = NewtonClass(
-            self.A,
-            self.b,
-            self.C,
-            self.d,
-            self.fm,
+            self.F,
+            self.g,
+            C=None,
+            d=None,
+            function_manager=self.fm,
             max_iters=self.max_inner_iters,
             epsilon=self.inner_epsilon,
             suppress_print=self.suppress_print,
@@ -442,6 +524,7 @@ class LPSolver:
             beta=self.beta,
             mu=self.mu,
             use_gpu=self.use_gpu,
+            use_psd_condition=self.use_psd_condition,
         )
 
         return ns
@@ -457,17 +540,33 @@ class LPSolver:
 
         x = cvx.Variable(len(self.x))
 
-        if self.c is not None:
-            obj = cvx.Minimize(self.c.T @ x)
-        else:
-            obj = cvx.Minimize(cvx.sum(x))
+        obj = 0
+        if self.P is not None:
+            obj += 0.5 * cvx.quad_form(x, self.P)
+        if self.q is not None:
+            obj += self.q.T @ x
+        obj = cvx.Minimize(obj)
 
         constr = []
-        if self.A is not None:
-            constr.append(self.A @ x == self.b)
+        if self.inequality_constrained:
 
-        if self.C is not None:
-            constr.append(self.C @ x <= self.d)
+            for i, A in enumerate(self.A):
+                if A.ndim > 1:
+                    norm = A @ x
+                else:
+                    norm = cvx.multiply(A, x)
+                if self.b is not None:
+                    norm += self.b[i]
+                norm = cvx.norm2(norm)
+                rhs = 0
+                if self.c is not None:
+                    rhs += self.c[i].T @ x
+                if self.d is not None:
+                    rhs += self.d[i]
+
+                constr.append(norm <= rhs)
+        if self.F is not None:
+            constr.append(self.F @ x == self.g)
 
         if self.lb is not None:
             constr.append(x >= self.lb)
@@ -484,13 +583,13 @@ class LPSolver:
 
     def __str__(self):
         opt_val = "Not yet solved" if self.optimal is False else self.value
-        return f"LinearSolver(Optimal Value: {opt_val})"
+        return f"SOCPSolver(Optimal Value: {opt_val})"
 
     def __repr__(self):
         return str(self)
 
     def solve(self, resolve=True, **kwargs):
-        """Solve the Linear Program
+        """Solve the SOCP
 
         Parameters:
             resolve: set to True if you want to resolve the LP;
@@ -505,7 +604,6 @@ class LPSolver:
 
         # set initializations based on kwargs passed to function or defaults set when creating LinearSolver object
         t = kwargs.get("t0", self.t0)
-
         max_outer_iters = kwargs.get("max_outer_iters", self.max_outer_iters)
         self.track_loss = kwargs.get("track_loss", self.track_loss)
 
@@ -521,7 +619,7 @@ class LPSolver:
         else:
             x = self.x
             update_x = False
-        if self.C is not None and self.phase1_solver.phase1_fm.s >= 1:
+        if self.A is not None and self.phase1_solver.phase1_fm.s >= 1:
             if not self.suppress_print:
                 print("running phase 1 solver")
             if update_x:
@@ -547,22 +645,22 @@ class LPSolver:
         objective_vals = []
         self.inner_iters = []
 
-        # make sure everyone is on the same page at our starting point
-        self.fm.update_x(x)
-        self.fm.update_t(t)
-
         if self.equality_constrained:
             # intialize the dual variable
             if self.use_gpu:
-                v = cp.zeros(self.A.shape[0])
+                v = cp.zeros(self.F.shape[0])
             else:
-                v = np.zeros(self.A.shape[0])
+                v = np.zeros(self.F.shape[0])
         else:
             v = None
 
         dual_gap = self.num_constraints
         best_x = x.copy()
         best_obj = np.inf
+
+        # make sure everyone is on the same page at our starting point
+        self.fm.update_x(x)
+        self.fm.update_t(t)
 
         for iter in range(max_outer_iters):
 
@@ -572,14 +670,13 @@ class LPSolver:
             self.inner_iters.append(numiters_t)
 
             if (
-                self.A is None
+                self.F is None
                 or (
                     self.use_gpu
-                    and cp.linalg.norm(cp.matmul(self.A, x) - self.b) < 1e-3
+                    and cp.linalg.norm(cp.matmul(self.F, x) - self.g) < 1e-3
                 )
-                or (np.linalg.norm(np.matmul(self.A, x) - self.b) < 1e-3)
+                or (np.linalg.norm(np.matmul(self.F, x) - self.g) < 1e-3)
             ):
-
                 obj_val = self.fm.objective()
                 if not self.suppress_print:
                     print(f"Objective value is now {obj_val}")
@@ -640,20 +737,48 @@ class LPSolver:
                 "Initial x must be in domain of problem (all entries less than upper bound)"
             )
 
-        if self.c is not None:
-            if len(self.c) != len(x):
-                raise ValueError("Initial x must be the same dimension as c!")
-
-        if self.C is not None:
-            # this error checking is solved by phase 1 solver
-            # if (self.C @ x >= self.d).any():
-            #    raise ValueError("Initial x must be in domain of problem (Cx <= d)")
-            if self.C.shape[1] != len(x):
-                raise ValueError("Initial x must have the same number of columns as C!")
+        if self.q is not None:
+            if len(self.q) != len(x):
+                raise ValueError("Initial x must be the same dimension as q!")
+        if self.P is not None:
+            if len(self.P) != len(x):
+                raise ValueError("Initial x must be the same dimension as P!")
 
         if self.A is not None:
-            if self.A.shape[1] != len(x):
-                raise ValueError("Initial x must have the same number of columns as A!")
+            for A in self.A:
+                if (
+                    A.ndim < 2
+                    and len(x) != len(A)
+                    or A.ndim == 2
+                    and A.shape[1] != len(x)
+                ):
+                    raise ValueError(
+                        "Initial x must have the same number of columns as A!"
+                    )
+
+        if self.F is not None:
+            if self.F.shape[1] != len(x):
+                raise ValueError("Initial x must have the same number of columns as F!")
+
+        if self.inequality_constrained:
+            for i, A in enumerate(self.A):
+                norm = A @ self.x
+                if self.b is not None:
+                    norm += self.b[i]
+                if self.use_gpu:
+                    norm = cp.linalg.norm(norm)
+                else:
+                    norm = np.linalg.norm(norm)
+                rhs = 0
+                if self.c is not None:
+                    rhs += self.c[i].T @ self.x
+                if self.d is not None:
+                    rhs += self.d[i]
+                if not (norm <= rhs):
+
+                    raise ValueError(
+                        f"Initial x must satisfy the cone constraint ||Ax + b ||_2 <= c^T x + d (failed constraint {i+1})"
+                    )
 
     def plot(self, subtract_cvxpy=True):
         if not (self.optimal and self.track_loss):
@@ -674,6 +799,6 @@ class LPSolver:
         )
         ax.set_xlabel("Cumulative Newton iterations")
         ax.set_ylabel("Optimality gap")
-        ax.set_title("Convergence of LPSolver")
+        ax.set_title("Convergence of SOCPSolver")
         ax.set_yscale("log")
         return ax
