@@ -86,7 +86,7 @@ class PhaseOneSolver:
         else:
             self.x = np.append(self.x, self.phase1_fm.s)
 
-        self.phase1_ns = NewtonSolverCholesky(
+        self.phase1_ns = NewtonSolverNPLstSq(
             C=self.C,
             d=self.d,
             function_manager=self.phase1_fm,

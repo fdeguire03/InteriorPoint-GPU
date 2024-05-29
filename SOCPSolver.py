@@ -33,6 +33,7 @@ class SOCPSolver:
         phase1_t0=0.01,
         max_outer_iters=50,
         max_inner_iters=20,
+        phase1_max_inner_iters=500,
         epsilon=1e-8,
         inner_epsilon=1e-5,
         check_cvxpy=True,
@@ -52,10 +53,12 @@ class SOCPSolver:
     ):
         """Initialize LP problem of form:
         Minimize 1/2 x^T P x + q^T x
-        Subject to ||Ax+b|| <= c^T x + d
+        Subject to ||A_i x + b_i|| <= c_i^T x + d_i
                    Fx == g
 
         with f in R^n, A in R^(mxn), b in R^m, c in R^n, d in R, F in R^(pxn), g in R^p, and x in R^n
+
+        Provide multiple instances of A, b, c, and d through a list
 
         The remaining parameters:
             sign (default 1): Used to set the sign of x (sign=1 to make x positive, sign=-1 to make x negative, sign=0 if unconstrained on sign)
@@ -149,7 +152,8 @@ class SOCPSolver:
         # If specified, make sure that the problem is feasible usign CVXPY
         # the CVXPY solution can also be used later to verify the solution of the LinearSolver
         if check_cvxpy:
-            print("Is testing CVXPY")
+            if not suppress_print:
+                print("Testing CVXPY")
             self.feasible, self.cvxpy_val, self.cvxpy_sol = self.__test_feasibility()
             if self.feasible == "infeasible":
                 raise ValueError("Provided problem instance is infeasible!")
@@ -222,6 +226,8 @@ class SOCPSolver:
         self.linear_solve_method = linear_solve_method
         self.get_dual_variables = get_dual_variables
         self.use_psd_condition = use_psd_condition
+        self.phase1_tol = phase1_tol
+        self.phase1_max_inner_iters = phase1_max_inner_iters
 
         # initialize the newton solver for this problem
         if self.A is not None:
@@ -412,7 +418,7 @@ class SOCPSolver:
             upper_bound=self.ub,
             x0=self.x,
             max_outer_iters=self.max_outer_iters,
-            max_inner_iters=self.max_inner_iters,
+            max_inner_iters=self.phase1_max_inner_iters,
             epsilon=self.epsilon,
             inner_epsilon=self.inner_epsilon,
             linear_solve_method="cholesky",
@@ -626,7 +632,7 @@ class SOCPSolver:
                 x, s = self.phase1_solver.solve(x0=x)
             else:
                 x, s = self.phase1_solver.solve()
-            if s > 0:
+            if s > -self.phase1_tol:
                 # This mean infeasibility
                 # TODO: Come up with what we do then
                 raise ValueError(
