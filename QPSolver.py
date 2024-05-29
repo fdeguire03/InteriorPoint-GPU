@@ -30,6 +30,7 @@ class QPSolver:
         t0=0.1,
         max_outer_iters=50,
         max_inner_iters=20,
+        phase1_max_inner_iters=500,
         epsilon=1e-8,
         inner_epsilon=1e-5,
         check_cvxpy=True,
@@ -137,7 +138,8 @@ class QPSolver:
         # If specified, make sure that the problem is feasible usign CVXPY
         # the CVXPY solution can also be used later to verify the solution of the LinearSolver
         if check_cvxpy:
-            print("Is testing CVXPY")
+            if not suppress_print:
+                print("Testing CVXPY")
             self.feasible, self.cvxpy_val, self.cvxpy_sol = self.__test_feasibility()
             if self.feasible == "infeasible":
                 raise ValueError("Provided problem instance is infeasible!")
@@ -205,6 +207,8 @@ class QPSolver:
         self.linear_solve_method = linear_solve_method
         self.get_dual_variables = get_dual_variables
         self.phase1_t0 = phase1_t0
+        self.phase1_tol = phase1_tol
+        self.phase1_max_inner_iters = phase1_max_inner_iters
 
         # initialize the newton solver for this problem
         if self.C is not None:
@@ -319,7 +323,7 @@ class QPSolver:
             upper_bound=self.ub,
             x0=self.x,
             max_outer_iters=self.max_outer_iters,
-            max_inner_iters=self.max_inner_iters,
+            max_inner_iters=self.phase1_max_inner_iters,
             epsilon=self.epsilon,
             inner_epsilon=self.inner_epsilon,
             linear_solve_method="cholesky",
@@ -514,7 +518,7 @@ class QPSolver:
                 x, s = self.phase1_solver.solve(x0=x)
             else:
                 x, s = self.phase1_solver.solve()
-            if s > 0:
+            if s > -self.phase1_tol:
                 # This mean infeasibility
                 # TODO: Come up with what we do then
                 raise ValueError(
