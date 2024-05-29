@@ -386,7 +386,10 @@ class FunctionManagerPhase1(FunctionManager):
         self.s = -self.slacks.min() + 1
         self.update_slacks_fxn()
         if not suppress_print:
-            print(f"Starting slack of {round(self.s, 4)}")
+            if self.use_gpu:
+                print(f"Starting slack of {cp.round(self.s, 4)}")
+            else:
+                print(f"Starting slack of {np.round(self.s, 4)}")
 
         self.update_obj = True
         self.update_newton_obj = True
@@ -677,12 +680,12 @@ class FunctionManagerQP(FunctionManager):
             if self.P is not None:
                 self.obj += 1 / 2 * self.x.dot(cp.matmul(self.P, self.x))
             if self.q is not None:
-                self.q.dot(self.x)
+                self.obj += self.q.dot(self.x)
         else:
             if self.P is not None:
                 self.obj += 1 / 2 * self.x.dot(np.matmul(self.P, self.x))
             if self.q is not None:
-                self.q.dot(self.x)
+                self.obj += self.q.dot(self.x)
         self.update_obj = False
 
         return self.obj
@@ -1210,7 +1213,10 @@ class FunctionManagerSOCPPhase1(FunctionManagerSOCP):
         self.s = -self.slacks.min() + 1
         self.update_slacks_fxn()
         if not suppress_print:
-            print(f"Starting slack of {round(self.s, 4)}")
+            if self.use_gpu:
+                print(f"Starting slack of {cp.round(self.s, 4)}")
+            else:
+                print(f"Starting slack of {np.round(self.s, 4)}")
 
         self.update_obj = True
         self.update_newton_obj = True

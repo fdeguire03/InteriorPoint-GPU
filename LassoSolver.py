@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy
+import cvxpy as cvx
 
 try:
     import cupy as cp
@@ -32,6 +33,7 @@ class LassoSolver:
         eps_rel=3e-2,
         use_gpu=False,
         num_chunks=0,
+        check_cvxpy=True
     ):
         """
         Solve problem of the form using ADMM:
@@ -78,12 +80,14 @@ class LassoSolver:
         self.EPS_ABS = eps_abs
         self.EPS_REL = eps_rel
         self.positive = positive
+        
+        self.num_samples = self.b.shape[1]
 
         if self.use_gpu:
             self.A = cp.array(A)
-            self.gaps = cp.zeros((self.max_iters, self.b.shape[1]))
+            self.gaps = cp.zeros((self.max_iters, self.num_samples))
         else:
-            self.gaps = np.zeros((self.max_iters, self.b.shape[1]))
+            self.gaps = np.zeros((self.max_iters, self.num_samples))
 
         self.m, self.n = self.A.shape
         if normalize_A:
@@ -95,6 +99,18 @@ class LassoSolver:
             else:
                 self.A = np.hstack((np.ones((self.m, 1)), self.A))
         self.n = self.A.shape[1]
+        
+        if check_cvxpy:
+            print("Testing CVXPY")
+            self.feasible, self.cvxpy_vals, self.cvxpy_sols = self.check_cvxpy()
+            if self.feasible == "infeasible":
+                raise ValueError("Provided problem instance is infeasible!")
+            elif self.feasible == "unbounded":
+                raise ValueError("Provided problem instance is unbounded!")
+            #else:
+            #    print(f'Optimal value of {round(self.cvxpy_val, 5)}')
+        else:
+            self.feasible, self.cvxpy_val = None, None
 
         self.AtA_cache = self.A.T @ self.A
 
@@ -152,7 +168,6 @@ class LassoSolver:
 
             if self.use_gpu:
                 self.b = cp.array(self.b)
-                self.num_samples = self.b.shape[1]
                 self.reg = cp.array(reg)
                 if self.mask is not None:
                     self.mask = cp.array(self.mask)
@@ -165,7 +180,6 @@ class LassoSolver:
                 self.u = cp.zeros((self.n, self.num_samples))
             else:
                 self.b = np.array(self.b)
-                self.num_samples = self.b.shape[1]
                 self.reg = np.array(reg)
                 if self.mask is not None:
                     self.mask = np.array(self.mask)
@@ -183,9 +197,15 @@ class LassoSolver:
                 self.Atb_cache = self.A.T @ self.b
                 self.bA_cache = self.Qinv_cache @ (self.Atb_cache)
                 self.bb_cache = self.b.T @ self.b
+                if self.use_gpu:
+                    self.Atb_cache = cp.array(self.Atb_cache)
+                    self.bb_cache = cp.array(self.bb_cache)
             else:
                 self.bA_cache = self.Qinv_cache @ (self.A.T @ self.b)
             self.Qinv_cache *= -self.m * self.rho
+            if self.use_gpu:
+                self.Qinv_cache = cp.array(self.Qinv_cache)
+                self.bA_cache = cp.array(self.bA_cache)
         else:
             self.solve_func = self.__run_admm_chunks
 
@@ -268,16 +288,36 @@ class LassoSolver:
                 # print(tau, rho)
                 # rho *= 1.0001
 
+        f = 1 / (2 * self.m) * ((self.A @ self.alpha - self.b) ** 2).sum(axis=0)
+        if self.use_gpu and not self.positive:
+            x_abs = cp.abs(self.alpha)
+        elif not self.positive:
+            x_abs = np.abs(self.alpha)
+        else:
+            x_abs = self.alpha
+        if self.add_bias:
+            norm1 = x_abs[1:].sum(axis=0)
+        else:
+            norm1 = x_abs.sum(axis=0)
+        f += self.reg * norm1
+        
+        self.solutions = f
         if self.use_gpu:
-            self.alpha = self.alpha.get()
-            self.gaps = self.gaps.get()
-        self.X = self.alpha
+            self.X = self.alpha.get()
+            gaps = self.gaps.get()
+        else:
+            self.X = self.alpha
+            gaps = self.gaps
 
-        return self.X, self.gaps[: iteration + 1]
+        return self.X, self.solutions, self.gaps[: iteration + 1], iteration+1
 
     def __run_admm_chunks(self):
 
         num_iterations = []
+        if self.use_gpu:
+            self.solutions = cp.empty(self.num_samples)
+        else:
+            self.solutions = np.empty(self.num_samples)
 
         reg_is_array = isinstance(self.reg, np.ndarray)
 
@@ -403,14 +443,30 @@ class LassoSolver:
                     # print(tau, rho)
                     # rho *= 1.0001
 
+            f = 1 / (2 * self.m) * ((self.A @ alpha - b_iter) ** 2).sum(axis=0)
+            if self.use_gpu and not self.positive:
+                x_abs = cp.abs(alpha)
+            elif not self.positive:
+                x_abs = np.abs(alpha)
+            else:
+                x_abs = alpha
+            if self.add_bias:
+                norm1 = x_abs[1:].sum(axis=0)
+            else:
+                norm1 = x_abs.sum(axis=0)
+            f += iter_reg * norm1
+            self.solutions[iter_indices] = f
             if self.use_gpu:
-                alpha = alpha.get()
-            self.X[:, iter_indices] = alpha
+                self.X[:, iter_indices] = alpha = alpha.get()
+            else:
+                self.X[:, iter_indices] = alpha
             num_iterations.append(iteration)
 
         if self.use_gpu:
-            self.gaps = self.gaps.get()
-        return self.X, self.gaps, num_iterations
+            gaps = self.gaps.get()
+        else:
+            gaps = self.gaps
+        return self.X, self.solutions, self.gaps, num_iterations
 
     def objective(self):
         """Compute the objective.
@@ -469,3 +525,28 @@ class LassoSolver:
             x[0] = v[0]  # don't penalize the bias term
 
         return x
+    
+    def check_cvxpy(self):
+        if self.use_gpu:
+            A = self.A.get()
+        else:
+            A = self.A
+        cvxpy_sols = []
+        cvxpy_vals = []
+        for i in range(self.num_samples):
+            print(f'CVXPY solving sample {i+1}...', end='')
+
+            x = cvx.Variable(self.n)
+            obj = cvx.Minimize(1/(2*self.m)*cvx.norm2(A@x - self.b[:,i])**2 + self.reg[i]*cvx.norm(x, 1))
+            prob = cvx.Problem(obj, [])
+            try:
+                prob.solve(solver="CLARABEL")
+                print(f'Optimal value of {round(prob.value, 4)}')
+            except Exception as e:
+                print('CVXPY SOLVER FAILED DUE TO THE FOLLOWING EXCEPTION:')
+                print(e)
+                
+            cvxpy_vals.append(prob.value)
+            cvxpy_sols.append(x.value)
+
+        return prob.status, np.array(cvxpy_vals), cvxpy_sols
