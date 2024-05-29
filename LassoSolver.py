@@ -82,6 +82,8 @@ class LassoSolver:
         self.positive = positive
         
         self.num_samples = self.b.shape[1]
+        assert len(reg) == self.b.shape[1] or len(reg) == 1 or self.b.shape[1] == 1
+        self.num_samples = max(self.b.shape[1], len(self.reg))
 
         if self.use_gpu:
             self.A = cp.array(A)
@@ -227,7 +229,7 @@ class LassoSolver:
                     self.alpha *= self.mask
 
             # dual update
-            self.u += self.x - self.alpha
+            self.u = self.u + self.x - self.alpha
 
             if self.compute_loss:
                 # save sub-optimality
@@ -535,9 +537,20 @@ class LassoSolver:
         cvxpy_vals = []
         for i in range(self.num_samples):
             print(f'CVXPY solving sample {i+1}...', end='')
-
+            
             x = cvx.Variable(self.n)
-            obj = cvx.Minimize(1/(2*self.m)*cvx.norm2(A@x - self.b[:,i])**2 + self.reg[i]*cvx.norm(x, 1))
+            
+            if self.b.shape[1] < self.num_samples:
+                error = A@x - self.b[:,0]
+            else:
+                error = A@x - self.b[:,i]
+                
+            if len(self.reg) < self.num_samples:
+                reg = self.reg
+            else:
+                reg = self.reg[i]
+
+            obj = cvx.Minimize(1/(2*self.m)*cvx.norm2(error)**2 + reg*cvx.norm(x, 1))
             prob = cvx.Problem(obj, [])
             try:
                 prob.solve(solver="CLARABEL")
