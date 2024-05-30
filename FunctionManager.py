@@ -586,12 +586,15 @@ class FunctionManagerPhase1(FunctionManager):
         hess_ss = inv_slacks_squared.sum()
 
         if self.use_gpu:
-            self.hess = cp.bmat(
-                [
-                    [hess_xx, hess_xs.reshape(-1, 1)],
-                    [hess_xs.reshape(1, -1), cp.array(hess_ss).reshape(1, 1)],
-                ],
-            )
+            top = cp.hstack([hess_xx, hess_xs.reshape(-1, 1)])
+            bot = cp.hstack([hess_xs.reshape(1, -1), cp.array(hess_ss).reshape(1, 1)])
+            self.hess = cp.vstack([top, bot])
+            #self.hess = cp.bmat(
+            #    [
+            #        [hess_xx, hess_xs.reshape(-1, 1)],
+            #        [hess_xs.reshape(1, -1), cp.array(hess_ss).reshape(1, 1)],
+            #    ],
+            #)
         else:
             self.hess = np.bmat(
                 [
