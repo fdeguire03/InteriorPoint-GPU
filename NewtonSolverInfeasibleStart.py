@@ -247,9 +247,7 @@ class NewtonSolverInfeasibleStart:
                 break
             next_x = x + step_size * xstep
             if self.update_slacks_every > 0:
-                update_slacks = (
-                    self.update_slacks_every % attempt == self.update_slacks_every - 1
-                )
+                update_slacks = attempt % self.update_slacks_every == self.update_slacks_every - 1
                 self.fm.update_x(next_x, update_slacks=update_slacks)
             else:
                 self.fm.update_x(next_x, update_slacks=False)

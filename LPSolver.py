@@ -30,7 +30,7 @@ class LPSolver:
         max_outer_iters=20,
         max_inner_iters=50,
         phase1_max_inner_iters=500,
-        epsilon=1e-11,
+        epsilon=1e-10,
         inner_epsilon=1e-5,
         check_cvxpy=True,
         linear_solve_method="cholesky",
@@ -618,6 +618,8 @@ class LPSolver:
             else:
                 if not self.suppress_print:
                     print(f"Newton step at iteration {iter+1} did not converge")
+                if len(objective_vals) > 0:
+                    objective_vals.append(objective_vals[-1])
 
             if not self.suppress_print and numiters_t >= self.max_inner_iters:
                 print(
@@ -632,7 +634,7 @@ class LPSolver:
                 break
 
             # increment t for next outer iteration
-            t = min(t * self.mu, (self.n + 1.0) / self.epsilon)
+            t = t * self.mu  # min(t * self.mu, (self.n + 1.0) / self.epsilon)
             self.fm.update_t(t)
 
         self.xstar = best_x
@@ -692,7 +694,7 @@ class LPSolver:
 
         ax = plt.subplot()
         ax.step(
-            np.cumsum(self.inner_iters),
+            np.cumsum(self.inner_iters[-len(obj_vals) :]),
             obj_vals - self.cvxpy_val,
             where="post",
         )

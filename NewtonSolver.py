@@ -195,7 +195,7 @@ class NewtonSolver:
             step_size *= self.beta
             if self.update_slacks_every > 0:
                 update_slacks = (
-                    self.update_slacks_every % attempt == self.update_slacks_every - 1
+                    attempt % self.update_slacks_every == self.update_slacks_every - 1
                 )
                 self.fm.update_x(next_x, update_slacks=update_slacks)
             else:

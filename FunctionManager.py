@@ -792,7 +792,7 @@ class FunctionManagerQP(FunctionManager):
 
         if self.C is not None:
             if self.use_gpu:
-                self.hess = cp.matmul(
+                self.hess += cp.matmul(
                     self.C.T,
                     (self.inv_slacks[self.inequality_slack_indices] ** 2)[:, None]
                     * self.C,
@@ -800,7 +800,7 @@ class FunctionManagerQP(FunctionManager):
                 if self.is_bounded:
                     diag = cp.einsum("ii->i", self.hess)
             else:
-                self.hess = np.matmul(
+                self.hess += np.matmul(
                     self.C.T,
                     (self.inv_slacks[self.inequality_slack_indices] ** 2)[:, None]
                     * self.C,
@@ -1125,7 +1125,7 @@ class FunctionManagerSOCP(FunctionManager):
 
             s_hess += self.AtA_cache[i]
             if self.c is not None:
-                s_hess -= self.cct_cache[i]
+                s_hess += self.cct_cache[i]
                 s_grad_term -= self.c[i] * self.slack_rhs[i]
             s_hess *= 2 / (s + 1e-12)
             s_grad_term *= 2 / (s + 1e-12)
@@ -1401,7 +1401,7 @@ class FunctionManagerSOCPPhase1(FunctionManagerSOCP):
                     s_grad_term = np.matmul(A.T, self.slack_lhs[i])
             s_hess += self.AtA_cache[i]
             if self.c is not None:
-                s_hess -= self.cct_cache[i]
+                s_hess += self.cct_cache[i]
                 s_grad_term -= self.c[i] * self.slack_rhs[i]
             s_hess *= 2 * invs
             s_grad_term *= 2 * invs
