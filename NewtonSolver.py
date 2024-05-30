@@ -34,6 +34,7 @@ class NewtonSolver:
         phase1_flag=False,
         phase1_tol=0.1,
         use_psd_condition=False,
+        update_slacks_every=0,
     ):
         """Solve convex optimization problem of the following form using Newton's method:
         argmin_x  t * obj_fxn(x)
@@ -74,6 +75,7 @@ class NewtonSolver:
         self.phase1_flag = phase1_flag
         self.phase1_tol = phase1_tol
         self.use_psd_condition = use_psd_condition
+        self.update_slacks_every = update_slacks_every
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values
@@ -102,7 +104,7 @@ class NewtonSolver:
                 self.fm.update_x(x)
                 if self.phase1_flag:
                     if x[-1] < -self.phase1_tol:
-                        return x, None, iter + 1, None
+                        return x, None, iter + 1, None, True
 
                 # check stopping criteria
                 # residuals = np.hstack(
@@ -125,12 +127,14 @@ class NewtonSolver:
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
                 nd = -gradf.dot(xstep) / 2
-                if step_size < 1e-15 or nd < self.eps:
-                    return x, None, iter + 1, nd
+                if step_size < 1e-13:
+                    return x, None, iter + 1, nd, False
+                elif nd < self.eps:
+                    return x, None, iter + 1, nd, True
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
             if self.suppress_print:
-                return x, None, iter + 1, nd
+                return x, None, iter + 1, nd, False
 
             print(
                 "REACHED MAX ITERATIONS: Problem likely infeasible or unbounded",
@@ -139,16 +143,16 @@ class NewtonSolver:
 
             # else we are not feasible
             print(" (Likely infeasible)")
-            return x, None, iter + 1, nd
+            return x, None, iter + 1, nd, False
 
         except np.linalg.LinAlgError:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, None, iter + 1, nd
+            return x, None, iter + 1, nd, False
         except cp.linalg.LinAlgError:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, None, iter + 1, nd
+            return x, None, iter + 1, nd, False
 
     def backtrack_search(self, x, xstep, t, gradf):
         """Backtracking search for Newton's method ensures that Newton step
@@ -166,9 +170,10 @@ class NewtonSolver:
         # make sure our next step is in the domain of f
 
         self.fm.update_x(next_x)
+
         while (self.fm.slacks < 0).any():
             step_size *= self.beta
-            if step_size < 1e-20:
+            if step_size < 1e-13:
                 if not self.suppress_print:
                     print(
                         "Backtracking search got stuck, returning from Newton's method now..."
@@ -177,16 +182,26 @@ class NewtonSolver:
             next_x = x + step_size * xstep
             self.fm.update_x(next_x)
 
+        attempt = 0
         while self.fm.newton_objective() > fx + self.alpha * step_size * grad_check:
+            attempt += 1
             next_x = x + step_size * xstep
-            if step_size < 1e-20:
+            if step_size < 1e-13:
                 if not self.suppress_print:
                     print(
                         "Backtracking search got stuck, returning from Newton's method now..."
                     )
                 return step_size
             step_size *= self.beta
-            self.fm.update_x(next_x)
+            if self.update_slacks_every > 0:
+                update_slacks = (
+                    self.update_slacks_every % attempt == self.update_slacks_every - 1
+                )
+                self.fm.update_x(next_x, update_slacks=update_slacks)
+            else:
+                self.fm.update_x(next_x, update_slacks=False)
+
+        self.fm.update_x(next_x)
 
         return step_size
 
@@ -204,7 +219,6 @@ class NewtonSolverNPLstSq(NewtonSolver):
     """
 
     def newton_linear_solve(self, x, gradf):
-        g = gradf
         H = self.fm.hessian()
         if self.use_gpu:
             xstep = cp.linalg.lstsq(H, -gradf, rcond=None)[0]
@@ -321,9 +335,9 @@ class NewtonSolverCholesky(NewtonSolver):
         if H is None:
             H = self.fm.hessian()
         if self.use_gpu:
-            xstep = cp.linalg.solve(H, -gradf)
+            xstep = cp.linalg.lstsq(H, -gradf, rcond=None)[0]
         else:
-            xstep = np.linalg.solve(H, -gradf)
+            xstep = np.linalg.lstsq(H, -gradf, rcond=None)[0]
         return xstep
 
 

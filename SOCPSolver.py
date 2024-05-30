@@ -31,10 +31,10 @@ class SOCPSolver:
         upper_bound=None,
         t0=0.1,
         phase1_t0=0.01,
-        max_outer_iters=50,
-        max_inner_iters=20,
+        max_outer_iters=20,
+        max_inner_iters=50,
         phase1_max_inner_iters=500,
-        epsilon=1e-8,
+        epsilon=1e-11,
         inner_epsilon=1e-5,
         check_cvxpy=True,
         linear_solve_method="cholesky",
@@ -50,6 +50,7 @@ class SOCPSolver:
         phase1_tol=0,
         use_psd_condition=False,
         x0=None,
+        update_slacks_every=0,
     ):
         """Initialize SOCP problem of form:
         Minimize 1/2 x^T P x + q^T x
@@ -243,6 +244,7 @@ class SOCPSolver:
         self.use_psd_condition = use_psd_condition
         self.phase1_tol = phase1_tol
         self.phase1_max_inner_iters = phase1_max_inner_iters
+        self.update_slacks_every = update_slacks_every
 
         # initialize the newton solver for this problem
         if self.A is not None:
@@ -448,6 +450,7 @@ class SOCPSolver:
             tol=tol,
             use_psd_condition=self.use_psd_condition,
             t0=self.phase1_t0,
+            update_slacks_every=self.update_slacks_every,
         )
 
         return phase1_solver
@@ -546,6 +549,7 @@ class SOCPSolver:
             mu=self.mu,
             use_gpu=self.use_gpu,
             use_psd_condition=self.use_psd_condition,
+            update_slacks_every=self.update_slacks_every,
         )
 
         return ns
@@ -685,7 +689,7 @@ class SOCPSolver:
 
         for iter in range(max_outer_iters):
 
-            x, v, numiters_t, _ = self.ns.solve(x, t, v0=v)
+            x, v, numiters_t, _, success_flag = self.ns.solve(x, t, v0=v)
 
             self.outer_iters += 1
             self.inner_iters.append(numiters_t)
@@ -706,7 +710,9 @@ class SOCPSolver:
                 if obj_val < best_obj:
                     best_obj = obj_val
                     best_x = x.copy()
-                else:
+                elif success_flag:
+                    # if the last step ran until convergence and the objective still increased, we can return
+                    # if success_flag is False, that means that the solver quit for some reason (maybe backtracking search got stuck, maybe something else)
                     break
 
             else:

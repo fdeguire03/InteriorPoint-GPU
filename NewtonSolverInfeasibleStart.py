@@ -31,6 +31,7 @@ class NewtonSolverInfeasibleStart:
         use_gpu=False,
         track_loss=False,
         use_psd_condition=False,
+        update_slacks_every=0,
     ):
         """Solve convex optimization problem of the following form using infeasible start Newton's method:
         argmin_x  t * obj_fxn(x)
@@ -66,6 +67,7 @@ class NewtonSolverInfeasibleStart:
         self.use_gpu = use_gpu and gpu_flag
         self.track_loss = track_loss
         self.use_psd_condition = use_psd_condition
+        self.update_slacks_every = update_slacks_every
 
     def solve(self, x, t, v0=None):
         """Solve a convex optimization problem using Newton's method, using the provided initial values
@@ -130,12 +132,14 @@ class NewtonSolverInfeasibleStart:
                 #    residual_norm2 = np.linalg.norm(r)
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
-                if step_size < 1e-13 or residual_norm < self.eps:
-                    return x, v, iter + 1, residual_norm
+                if step_size < 1e-13:
+                    return x, v, iter + 1, residual_norm, False
+                elif residual_norm < self.eps:
+                    return x, v, iter + 1, residual_norm, True
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to
             if self.suppress_print:
-                return x, v, iter + 1, residual_norm
+                return x, v, iter + 1, residual_norm, False
 
             print(
                 "REACHED MAX ITERATIONS: Problem likely infeasible or unbounded",
@@ -146,22 +150,22 @@ class NewtonSolverInfeasibleStart:
             if (self.A @ x - self.b < self.eps).all():
                 if not self.suppress_print:
                     print(" (Likely unbounded)")
-                return x, v, iter + 1, residual_norm
+                return x, v, iter + 1, residual_norm, False
 
             # else we are not feasible
             else:
                 if not self.suppress_print:
                     print(" (Likely infeasible)")
-                return x, v, iter + 1, residual_norm
+                return x, v, iter + 1, residual_norm, False
 
         except np.linalg.LinAlgError as e:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1, residual_norm
+            return x, v, iter + 1, residual_norm, False
         except cp.linalg.LinAlgError:
             if not self.suppress_print:
                 print("OVERFLOW ERROR: Problem likely unbounded")
-            return x, v, iter + 1, residual_norm
+            return x, v, iter + 1, residual_norm, False
 
     def backtrack_search(self, x, v, xstep, vstep, t, gradf, residual_normp=None):
         """Backtracking search for Newton's method ensures that Newton step
@@ -176,11 +180,14 @@ class NewtonSolverInfeasibleStart:
 
         # make sure our next step is in the domain of f
         self.fm.update_x(next_x)
+
         while (self.fm.slacks < 0).any():
             step_size *= self.beta
-            if step_size < 1e-20:
+            if step_size < 1e-13:
                 if not self.suppress_print:
-                    print("Backtracking search got stuck, returning from Newton's method now...")
+                    print(
+                        "Backtracking search got stuck, returning from Newton's method now..."
+                    )
                 return step_size, None, None
             next_x = x + step_size * xstep
             self.fm.update_x(next_x)
@@ -228,14 +235,26 @@ class NewtonSolverInfeasibleStart:
             next_residual_norm = np.linalg.norm(residual_step)
 
         # make sure the residual is descending enough
+        attempt = 0
         while next_residual_norm > (1 - self.alpha * step_size) * residual_norm:
+            attempt += 1
             step_size *= self.beta
-            if step_size < 1e-20:
+            if step_size < 1e-13:
                 if not self.suppress_print:
-                    print("Backtracking search got stuck, returning from Newton's method now...")
+                    print(
+                        "Backtracking search got stuck, returning from Newton's method now..."
+                    )
                 break
             next_x = x + step_size * xstep
-            next_grad = self.fm.gradient(next_x)
+            if self.update_slacks_every > 0:
+                update_slacks = (
+                    self.update_slacks_every % attempt == self.update_slacks_every - 1
+                )
+                self.fm.update_x(next_x, update_slacks=update_slacks)
+            else:
+                self.fm.update_x(next_x, update_slacks=False)
+
+            next_grad = self.fm.gradient()
             rnext_dual = next_grad + ATv_cache + step_size * ATvstep_cache
             rnext_primal = Axb_cache + step_size * Axstep_cache
             if self.use_gpu:
@@ -250,6 +269,8 @@ class NewtonSolverInfeasibleStart:
                     rnext_primal,
                 )
                 next_residual_norm = np.linalg.norm(residual_step)
+
+        self.fm.update_x(next_x)
 
         return step_size, next_grad, next_residual_norm
 

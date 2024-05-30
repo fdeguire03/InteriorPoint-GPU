@@ -30,6 +30,7 @@ class PhaseOneSolver:
         socp=False,
         socp_params=None,
         use_psd_condition=False,
+        update_slacks_every=0
     ):
 
         # all attributes for LP
@@ -56,6 +57,7 @@ class PhaseOneSolver:
         self.track_loss = track_loss
         self.tol = tol
         self.t0 = t0
+        self.update_slacks_every = update_slacks_every
 
         if not socp:
             self.phase1_fm = FunctionManagerPhase1(
@@ -86,7 +88,7 @@ class PhaseOneSolver:
         else:
             self.x = np.append(self.x, self.phase1_fm.s)
 
-        self.phase1_ns = NewtonSolverNPLstSq(
+        self.phase1_ns = NewtonSolverCholesky(
             C=self.C,
             d=self.d,
             function_manager=self.phase1_fm,
@@ -104,6 +106,7 @@ class PhaseOneSolver:
             phase1_flag=True,
             phase1_tol=self.tol,
             use_psd_condition=use_psd_condition,
+            update_slacks_every=self.update_slacks_every
         )
 
     def solve(self, x0=None):
@@ -121,7 +124,7 @@ class PhaseOneSolver:
             if not self.suppress_print:
                 print(f"Current slack: {self.phase1_fm.s}")
 
-            self.x, _, numiters_t, _ = self.phase1_ns.solve(self.x, t)
+            self.x, _, numiters_t, _, success_flag = self.phase1_ns.solve(self.x, t)
 
             self.outer_iters += 1
             self.inner_iters.append(numiters_t)

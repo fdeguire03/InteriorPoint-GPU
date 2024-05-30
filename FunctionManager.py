@@ -48,7 +48,9 @@ class FunctionManager:
         self.is_constrained = self.C is not None or self.is_bounded
 
         start_index = 0
+        end_index = 0
         if self.C is not None:
+            end_index = start_index + len(self.C)
             self.inequality_slack_indices = slice(start_index, len(self.C))
             start_index += len(self.C)
         if self.ub is not None:
@@ -194,10 +196,14 @@ class FunctionManager:
 
 class FunctionManagerLP(FunctionManager):
 
-    def update_x(self, x):
+    def update_x(self, x, update_slacks=True):
         super().update_x(x)
         if self.is_constrained:
-            self.update_slacks_fxn()
+            if update_slacks:
+                self.update_slacks_fxn()
+            else:
+                self.update_slacks = True
+                self.update_inv_slacks = True
 
     def newton_objective(self, x=None, t=None):
 
@@ -439,7 +445,7 @@ class FunctionManagerPhase1(FunctionManager):
         self.update_inv_slacks = True
         self.update_slacks = False
 
-    def update_x(self, x):
+    def update_x(self, x, update_slacks=True):
 
         if len(x) == len(self.x) + 1:
             self.x = x[:-1]
@@ -449,7 +455,11 @@ class FunctionManagerPhase1(FunctionManager):
         else:
             raise ValueError("Provided x does not have the right dimensions!")
 
-        self.update_slacks_fxn()
+        if update_slacks:
+            self.update_slacks_fxn()
+        else:
+            self.update_slacks = True
+            self.update_inv_slacks = True
         self.update_obj = True
         self.update_newton_obj = True
         self.update_grad = True
@@ -687,10 +697,14 @@ class FunctionManagerQP(FunctionManager):
 
         return self.obj
 
-    def update_x(self, x):
+    def update_x(self, x, update_slacks=True):
         super().update_x(x)
         if self.is_constrained:
-            self.update_slacks_fxn()
+            if update_slacks:
+                self.update_slacks_fxn()
+            else:
+                self.update_slacks = True
+                self.update_inv_slacks = True
 
     def newton_objective(self, x=None, t=None):
 
@@ -997,10 +1011,14 @@ class FunctionManagerSOCP(FunctionManager):
 
         return self.obj
 
-    def update_x(self, x):
+    def update_x(self, x, update_slacks=True):
         super().update_x(x)
         if self.is_constrained:
-            self.update_slacks_fxn()
+            if update_slacks:
+                self.update_slacks_fxn()
+            else:
+                self.update_slacks = True
+                self.updTE_inv_slacks = True
 
     def newton_objective(self, x=None, t=None):
 
@@ -1237,7 +1255,7 @@ class FunctionManagerSOCPPhase1(FunctionManagerSOCP):
         self.slacks[self.constraint_indices] += self.s
         self.update_inv_slacks = True
 
-    def update_x(self, x):
+    def update_x(self, x, update_slacks=True):
 
         if len(x) == len(self.x) + 1:
             self.x = x[:-1]
@@ -1247,7 +1265,11 @@ class FunctionManagerSOCPPhase1(FunctionManagerSOCP):
         else:
             raise ValueError("Provided x does not have the right dimensions!")
 
-        self.update_slacks_fxn()
+        if update_slacks:
+            self.update_slacks_fxn()
+        else:
+            self.update_slacks = True
+            self.updTE_inv_slacks = True
         self.update_obj = True
         self.update_newton_obj = True
         self.update_grad = True
