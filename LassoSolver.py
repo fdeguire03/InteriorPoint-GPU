@@ -25,7 +25,6 @@ class LassoSolver:
         check_stop=10,
         add_bias=False,
         normalize_A=False,
-        mask=None,
         positive=False,
         compute_loss=False,
         adaptive_rho=False,
@@ -33,7 +32,7 @@ class LassoSolver:
         eps_rel=3e-2,
         use_gpu=False,
         num_chunks=0,
-        check_cvxpy=True
+        check_cvxpy=True,
     ):
         """
         Solve problem of the form using ADMM:
@@ -42,20 +41,47 @@ class LassoSolver:
 
         If a matrix is passed to b, the problem is solved for multiple instances simultaneously
 
-        Also supports solving the problem with a masked x or all positive entries in x
+        If a vector or list is passed to reg, a different regularization is applied to each problem.
+
+        Can also constrain x to be positive by setting positive=True
+
+        Other parameters:
+
+        Rho (default 0.4): Rho parameter to use in ADMM. Tuning to specific problems can drastically improve convergence.
+
+        Max_iters (default 1000): Maximum number of iterations to run
+
+        Check_stop (default 10): How often to check stopping conditions for the problem
+
+        add_bias (default False): Whether to add a bias term in the fit vector
+
+        normalize_A (default False): Whether to normalize the features (columns of A) to have unit variance
+
+        compute_loss (default False): Whether to compute the objective value at each iteration. Nice performance boost to not calculate, but may want to have it on during parameter tuning
+
+        adaptive_rho (default False): NOT IMPLEMENTED, under construction to adaptively change rho as problem progresses. Currently just sets rho to 10 / (minimum eigenvalue of A^T A)
+
+        eps_abs (default 1e-4): Absolute convergence tolerance
+
+        eps_rel (default 3e-2): Relative convergence tolerance
+
+        use_gpu (default False): Set to True to run algorithm on GPU hardware (if available)
+
+        num_chunks (default 1): Set to positive value if you want to manually force the problem to be solved in multiple chunks. By default, the LassoSolver will
+                                automatically calculate chunk size for GPU problems and run CPU problems in one chunk.
+                                Running in chunks has both more overhead and more per-call cost because it must manage running the problems sequentially as well as recompute
+                                some parameters on each subproblem as opposed to precomputing global parameters.
+
+        check_cvxpy (default True): Set to True if you want the program to calculate CVXPY optimal values before solving.
         """
 
+        # if using a GPU, estimate memory requirements to determine if the problem should be split into chunks
         self.use_gpu = use_gpu and gpu_flag
         if self.use_gpu:
             X_shape = (A.shape[1], b.shape[0])
             Xb_size = (
                 np.prod(X_shape) * 3 + np.prod(b.shape)
             ) * 8  # need to be able to fit three copies the size of X on GPU
-            if mask is not None:
-                Xb_size += np.prod(mask.shape) * 8
-                Xb_size -= (
-                    (b.shape[1] + 3 * X_shape[0]) * ((mask.sum(axis=0) == 0).sum()) * 8
-                )
             A_size = (
                 np.prod(A.shape) * 8 + A.shape[1] ** 2 * 8
             )  # be able to fit A and A^TA in GPU
@@ -73,14 +99,13 @@ class LassoSolver:
             self.b = self.b[:, None]
         self.reg = reg
         self.rho = rho
-        self.mask = mask
         self.max_iters = max_iters
         self.check_stop = check_stop
         self.compute_loss = compute_loss
         self.EPS_ABS = eps_abs
         self.EPS_REL = eps_rel
         self.positive = positive
-        
+
         self.num_samples = self.b.shape[1]
         assert len(reg) == self.b.shape[1] or len(reg) == 1 or self.b.shape[1] == 1
         self.num_samples = max(self.b.shape[1], len(self.reg))
@@ -98,10 +123,12 @@ class LassoSolver:
         if self.add_bias:
             if self.use_gpu:
                 self.A = cp.hstack((cp.ones((self.m, 1)), self.A))
+                self.AtA_cache = cp.matmul(self.A.T, self.A)
             else:
                 self.A = np.hstack((np.ones((self.m, 1)), self.A))
+                self.AtA_cache = np.matmul(self.A.T, self.A)
         self.n = self.A.shape[1]
-        
+
         if check_cvxpy:
             print("Testing CVXPY")
             self.feasible, self.cvxpy_vals, self.cvxpy_sols = self.check_cvxpy()
@@ -109,12 +136,10 @@ class LassoSolver:
                 raise ValueError("Provided problem instance is infeasible!")
             elif self.feasible == "unbounded":
                 raise ValueError("Provided problem instance is unbounded!")
-            #else:
+            # else:
             #    print(f'Optimal value of {round(self.cvxpy_val, 5)}')
         else:
-            self.feasible, self.cvxpy_val = None, None
-
-        self.AtA_cache = self.A.T @ self.A
+            self.feasible, self.cvxpy_vals, self.cvxpy_sols = None, None, None
 
         # not recommended to use this, just trying something out
         if adaptive_rho:
@@ -128,7 +153,7 @@ class LassoSolver:
             # which is theta(n) (n is # dimensions).
             # cond_limit_upper = XtX.shape[0] / 3
             # lambda_min = max(lambda_min, lambda_max / cond_limit_upper)
-            rho = 10 / cp.sqrt(lambda_min)
+            rho = 10 / np.sqrt(lambda_min)
 
         if self.use_gpu:
             I = cp.eye(self.n)
@@ -171,27 +196,14 @@ class LassoSolver:
             if self.use_gpu:
                 self.b = cp.array(self.b)
                 self.reg = cp.array(reg)
-                if self.mask is not None:
-                    self.mask = cp.array(self.mask)
 
                 self.stop_multiplier = self.EPS_ABS * cp.sqrt(self.n * self.num_samples)
 
-                # initialize the primal and dual parameters:
-                self.x = cp.zeros((self.n, self.num_samples))
-                self.alpha = cp.zeros((self.n, self.num_samples))
-                self.u = cp.zeros((self.n, self.num_samples))
             else:
                 self.b = np.array(self.b)
                 self.reg = np.array(reg)
-                if self.mask is not None:
-                    self.mask = np.array(self.mask)
 
                 self.stop_multiplier = self.EPS_ABS * np.sqrt(self.n * self.num_samples)
-
-                # initialize the primal and dual parameters:
-                self.x = np.zeros((self.n, self.num_samples))
-                self.alpha = np.zeros((self.n, self.num_samples))
-                self.u = np.zeros((self.n, self.num_samples))
 
             self.eta = self.reg / self.rho
 
@@ -212,6 +224,17 @@ class LassoSolver:
             self.solve_func = self.__run_admm_chunks
 
     def solve(self):
+        if self.use_gpu:
+            # initialize the primal and dual parameters:
+            self.x = cp.zeros((self.n, self.num_samples))
+            self.alpha = cp.zeros((self.n, self.num_samples))
+            self.u = cp.zeros((self.n, self.num_samples))
+        else:
+            # initialize the primal and dual parameters:
+            self.x = np.zeros((self.n, self.num_samples))
+            self.alpha = np.zeros((self.n, self.num_samples))
+            self.u = np.zeros((self.n, self.num_samples))
+
         return self.solve_func()
 
     def __run_admm(self):
@@ -219,14 +242,12 @@ class LassoSolver:
         # run ADMM
         for iteration in range(self.max_iters):
             # primal updates
-            self.x = self.bA_cache + self.Qinv_cache @ (self.u - self.alpha)
+            if self.use_gpu:
+                self.x = self.bA_cache + cp.matmul(self.Qinv_cache, self.u - self.alpha)
+            else:
+                self.x = self.bA_cache + self.Qinv_cache @ (self.u - self.alpha)
             last_alpha = self.alpha
             self.alpha = self.prox(self.x + self.u, self.eta)
-            if self.mask is not None:
-                if self.add_bias:
-                    self.alpha[1:] *= self.mask
-                else:
-                    self.alpha *= self.mask
 
             # dual update
             self.u = self.u + self.x - self.alpha
@@ -302,7 +323,7 @@ class LassoSolver:
         else:
             norm1 = x_abs.sum(axis=0)
         f += self.reg * norm1
-        
+
         self.solutions = f
         if self.use_gpu:
             self.X = self.alpha.get()
@@ -311,11 +332,13 @@ class LassoSolver:
             self.X = self.alpha
             gaps = self.gaps
 
-        return self.X, self.solutions, self.gaps[: iteration + 1], iteration+1
+        self.num_iterations = [iteration + 1]
+
+        return self.X, self.solutions, self.gaps[: iteration + 1], iteration + 1
 
     def __run_admm_chunks(self):
 
-        num_iterations = []
+        self.num_iterations = []
         if self.use_gpu:
             self.solutions = cp.empty(self.num_samples)
         else:
@@ -334,8 +357,6 @@ class LassoSolver:
                     iter_reg = cp.array(self.reg[iter_indices])
                 else:
                     iter_reg = cp.array(self.reg)
-                if self.mask is not None:
-                    iter_mask = cp.array(self.mask)
 
                 iter_stop_multiplier = self.EPS_ABS * cp.sqrt(self.n * num_samples)
 
@@ -352,8 +373,6 @@ class LassoSolver:
                     iter_reg = np.array(self.reg[iter_indices])
                 else:
                     iter_reg = np.array(self.reg)
-                if self.mask is not None:
-                    iter_mask = np.array(self.mask)
 
                 iter_stop_multiplier = self.EPS_ABS * np.sqrt(self.n * num_samples)
 
@@ -378,11 +397,6 @@ class LassoSolver:
                 x = bA_cache + Qinv_cache_iter @ (u - alpha)
                 last_alpha = alpha
                 alpha = self.prox(x + u, eta)
-                if self.mask is not None:
-                    if self.add_bias:
-                        alpha[1:] *= iter_mask
-                    else:
-                        alpha *= iter_mask
 
                 # dual update
                 u = u + (x - alpha)
@@ -462,13 +476,13 @@ class LassoSolver:
                 self.X[:, iter_indices] = alpha = alpha.get()
             else:
                 self.X[:, iter_indices] = alpha
-            num_iterations.append(iteration)
+            self.num_iterations.append(iteration)
 
         if self.use_gpu:
             gaps = self.gaps.get()
         else:
             gaps = self.gaps
-        return self.X, self.solutions, self.gaps, num_iterations
+        return self.X, self.solutions, gaps, self.num_iterations
 
     def objective(self):
         """Compute the objective.
@@ -527,7 +541,7 @@ class LassoSolver:
             x[0] = v[0]  # don't penalize the bias term
 
         return x
-    
+
     def check_cvxpy(self):
         if self.use_gpu:
             A = self.A.get()
@@ -536,30 +550,71 @@ class LassoSolver:
         cvxpy_sols = []
         cvxpy_vals = []
         for i in range(self.num_samples):
-            print(f'CVXPY solving sample {i+1}...', end='')
-            
+            print(f"CVXPY solving sample {i+1}...", end="")
+
             x = cvx.Variable(self.n)
-            
+
             if self.b.shape[1] < self.num_samples:
-                error = A@x - self.b[:,0]
+                error = A @ x - self.b[:, 0]
             else:
-                error = A@x - self.b[:,i]
-                
+                error = A @ x - self.b[:, i]
+
             if len(self.reg) < self.num_samples:
                 reg = self.reg
             else:
                 reg = self.reg[i]
 
-            obj = cvx.Minimize(1/(2*self.m)*cvx.norm2(error)**2 + reg*cvx.norm(x, 1))
+            obj = cvx.Minimize(
+                1 / (2 * self.m) * cvx.norm2(error) ** 2 + reg * cvx.norm(x, 1)
+            )
             prob = cvx.Problem(obj, [])
             try:
                 prob.solve(solver="CLARABEL")
-                print(f'Optimal value of {round(prob.value, 4)}')
+                print(f"Optimal value of {round(prob.value, 4)}")
             except Exception as e:
-                print('CVXPY SOLVER FAILED DUE TO THE FOLLOWING EXCEPTION:')
+                print("CVXPY SOLVER FAILED DUE TO THE FOLLOWING EXCEPTION:")
                 print(e)
-                
+
             cvxpy_vals.append(prob.value)
             cvxpy_sols.append(x.value)
 
         return prob.status, np.array(cvxpy_vals), cvxpy_sols
+
+    def plot(self, iteration_start=0, iteration_end=-1, subtract_opt=True):
+        """Pass a positive value to iteration start to start the plots after a certain iteration number
+        Pass a larger value to iteration end to plot only through a certain iteration number
+        """
+
+        if not self.compute_loss:
+            raise ValueError(
+                "Need to solve problem with compute_loss set to True to be able to plot convergence!"
+            )
+
+        if iteration_end == -1:
+            iteration_end = self.num_iterations
+        elif not isinstance(iteration_end, list):
+            iteration_end = list(iteration_end)
+
+        if self.use_gpu:
+            gaps = self.gaps.get()
+        else:
+            gaps = self.gaps
+
+        ax = plt.subplot()
+        for i in range(gaps.shape[1]):
+            iter_gaps = gaps[iteration_start : iteration_end[i % self.num_chunks], i]
+            if subtract_opt:
+                iter_min = iter_gaps.min()
+
+                if self.cvxpy_vals is not None:
+                    iter_min = min(self.cvxpy_vals[i], iter_min)
+                ax.plot(iter_gaps - iter_min)
+            else:
+                ax.plot(iter_gaps)
+        ax.set_ylabel("Optimality gap")
+
+        ax.set_xlabel("iteration number")
+
+        ax.set_title("Convergence of LassoSolver")
+        ax.set_yscale("log")
+        return ax

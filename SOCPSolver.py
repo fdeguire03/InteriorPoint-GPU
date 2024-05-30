@@ -51,32 +51,39 @@ class SOCPSolver:
         use_psd_condition=False,
         x0=None,
     ):
-        """Initialize LP problem of form:
+        """Initialize SOCP problem of form:
         Minimize 1/2 x^T P x + q^T x
         Subject to ||A_i x + b_i|| <= c_i^T x + d_i
                    Fx == g
+                   lower_bound <= x <= upper_bound
 
-        with f in R^n, A in R^(mxn), b in R^m, c in R^n, d in R, F in R^(pxn), g in R^p, and x in R^n
+        with P in S_+^(nxn) (i.e. PSD symmetric matrix), q inn R^n, A in R^(mxn), b in R^m, c in R^n, d in R, F in R^(pxn), g in R^p, and x in R^n
 
-        Provide multiple instances of A, b, c, and d through a list
+        Can provide multiple instances of A, b, c, and d through a list
 
         The remaining parameters:
-            sign (default 1): Used to set the sign of x (sign=1 to make x positive, sign=-1 to make x negative, sign=0 if unconstrained on sign)
 
-            t0 (default 1): Starting point for interior point method
+            t0 (default 1): Starting point for interior point method. Consider using lower value (<0.1). Will take more outer iterations, but fewer inner iterations on Newton solver.
 
             max_outer_iters (default 50): Maximum number of iterations to run for interior point solver
 
             max_inner_iters (default 20): Maximum number of iterations of Newton's method to run at each step
 
+            phase1_max_inner_iters (default 500): Maximum number of iterations of Newton's method to run while solving phase 1 method. Consider using larger value because if the solver
+                                                    its max iterations, it may conclude that the problem is infeasible even though it is
+
             epsilon (default 1e-8): Desired optimality gap for entire problem
 
-            inner_epsilon (default 1e-5): Minimum optimality gap for each Newton solve
+            inner_epsilon (default 1e-5): Minimum norm of residuals for each Newton solve
+
+            phase1_tol (default 0): Required slack to consider phase 1 method complete. Set to above 0 if you want to find a point that is 'more' feasible.
+
+            phase1_t0 (default 0.01): Starting point for interior point solver during phase 1. Usually performs better when even lower than the t0 for main solver because determining feasibility is paramount.
 
             check_cvxpy (default True): Performs an initial check on solving the problem using CVXPY to be able to compare optimal value and determine feasibility.
                         May take a long time if problem is large
 
-            linear_solve_method (default 'np_solve): Method to solve linear equations during Newton solves (options include 'np_solve' (call np.linalg.solve),
+            linear_solve_method (default 'cholesky'): Method to solve linear equations during Newton solves (options include 'np_solve' (call np.linalg.solve),
                 'cholesky' (Solve using Cholesky-factorization and forward-backward substitution), 'cg' (conjugate gradient),
                 'direct' (form matrix inverse), and 'np_lstsq' (call np.linalg.lstsq))
 
@@ -92,6 +99,14 @@ class SOCPSolver:
 
             try_diag (default True): set to True if you want to try calcuating all Hessian matrices as diagonal matrices. Potential speedup if Hessian is diagonal,
                                     really no cost if its not, so recommended to keep as True
+
+            track_loss (default True): set to True to be able to plot objective values after completion. Turn off for slight performance gains.
+
+            get_dual_variables (default False): set to True if you want the solve function to calculate optimal dual variables in addition to optimal dual variables. Really no
+                                                    performance cost to make the calculation, but it is not fully tested.
+
+            x0 (default None): Leave as None to allow program to automatically generate an initial x. Pass an x with the correct dimensions if you want to supply the starting point.
+
         """
 
         self.use_gpu = use_gpu and gpu_flag
@@ -272,7 +287,7 @@ class SOCPSolver:
                     if is_diag:
                         self.A[i] = diag_elem
                     else:
-                        np.fill_diagonal(a, diag_elem)
+                        np.fill_diagonal(A, diag_elem)
 
                 else:
                     n_A = A.shape[0]
@@ -455,8 +470,8 @@ class SOCPSolver:
             F=self.F,
             g=self.g,
             x0=self.x,
-            # lower_bound=self.lb,
-            # upper_bound=self.ub,
+            lower_bound=self.lb,
+            upper_bound=self.ub,
             t=1,
             use_gpu=self.use_gpu,
             n=self.n,
@@ -548,7 +563,7 @@ class SOCPSolver:
 
         obj = 0
         if self.P is not None:
-            obj += 0.5 * cvx.quad_form(x, self.P)
+            obj += 0.5 * cvx.quad_form(x, cvx.psd_wrap(self.P))
         if self.q is not None:
             obj += self.q.T @ x
         obj = cvx.Minimize(obj)
