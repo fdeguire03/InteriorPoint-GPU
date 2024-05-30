@@ -125,7 +125,7 @@ class NewtonSolver:
 
                 # return if our equality constraint and problem are solved to satisfactory epsilon
                 nd = -gradf.dot(xstep) / 2
-                if step_size < 1e-10 or nd < self.eps:
+                if step_size < 1e-15 or nd < self.eps:
                     return x, None, iter + 1, nd
 
             # if we reach the maximum number of iterations, print warnings to the user unless specified not to

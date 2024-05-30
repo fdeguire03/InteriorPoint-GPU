@@ -677,12 +677,12 @@ class FunctionManagerQP(FunctionManager):
             if self.P is not None:
                 self.obj += 1 / 2 * self.x.dot(cp.matmul(self.P, self.x))
             if self.q is not None:
-                self.q.dot(self.x)
+                self.obj += self.q.dot(self.x)
         else:
             if self.P is not None:
                 self.obj += 1 / 2 * self.x.dot(np.matmul(self.P, self.x))
             if self.q is not None:
-                self.q.dot(self.x)
+                self.obj += self.q.dot(self.x)
         self.update_obj = False
 
         return self.obj
