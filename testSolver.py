@@ -10,6 +10,8 @@ import cvxpy as cp
 import cupy
 from time import time
 import pandas as pd
+import jax.numpy as jnp
+from jaxopt import BoxOSQP
 
 print("script started", flush=True)
 
@@ -41,44 +43,45 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
     cvxpy_times = np.zeros((num_tests, N))  # Every row is for a different
     ls_gpu_times = np.zeros((num_tests, N)) # dimension and every
     ls_cpu_times = np.zeros((num_tests, N)) # column is a different test
+    jax_times = np.zeros((num_tests, N))
 
     # Containers for storing optimal values
     cvxpy_values = np.zeros((num_tests, N))
     ls_gpu_values = np.zeros((num_tests, N))
     ls_cpu_values = np.zeros((num_tests, N))
+    jax_values = np.zeros((num_tests, N))
 
     ### Run test on LP
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
       
       if verbose:
-        print(f"n is {n}")
-        print("Generate some data")
-      
-      # Generate A
-      A = np.random.uniform(low = -2, high = 2, size = (m, n))
+          print("\n")
+          print(f"n is {n}")
+          print("Start testing")
 
-      # Generate C
-      C = np.random.uniform(low = -2, high = 2, size = (k, n))
-
-      # Generate x_feas and c
-      x_feas = np.random.uniform(low = -2, high = 2, size = (n))
-      c = np.random.uniform(low = -2, high = 2, size = (n))
-
-      # From this, calculate b and d
-      b = A @ x_feas
-      d = C @ x_feas
-
-      # Have upper and lower bounds
-      up_bnd = 3
-      lo_bnd = -3
-
-      # Create CVXPY problem
-      if verbose:
-        print("Solve in CVXPY")
-        
       num_iters = N if n < 1000 else int(N/2)
 
       for i in range(num_iters):
+        
+        # Generate A
+        A = np.random.uniform(low = -2, high = 2, size = (m, n))
+
+        # Generate C
+        C = np.random.uniform(low = -2, high = 2, size = (k, n))
+
+        # Generate x_feas and c
+        x_feas = np.random.uniform(low = -2, high = 2, size = (n))
+        c = np.random.uniform(low = -2, high = 2, size = (n))
+
+        # From this, calculate b and d
+        b = A @ x_feas
+        d = C @ x_feas
+
+        # Have upper and lower bounds
+        up_bnd = 3
+        lo_bnd = -3
+
+        # Create CVXPY problem
 
         # Solve in CVXPY
         x = cp.Variable(n)
@@ -99,28 +102,20 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
 
         if verbose:
           print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
-        
+
+        if i == num_iters - 1 and verbose:
+          print(f"CVXPY gets optimal value {obj.value}")
+      
         # Store
         cvxpy_times[count, i] = tok - tik
         cvxpy_values[count, i] = obj.value
 
-        if i == num_iters - 1 and verbose:
-            print(f"Problem is {prob.status}")
-            print(f"CVXPY gets optimal value of {obj.value}")
-
-        # Delete objects just to be sure
+        # Delete
         del x
-        del obj
         del constr
         del prob
 
-      # Move on to LP-solver on GPU
-      if verbose:
-        print("LP-solver, GPU")
-
-      num_iters = N if n < 1000 else int(N/2)
-      
-      for i in range(num_iters):
+        # Move on to LP-solver on GPU
 
         # Create instance
         ls_gpu = LPSolver(
@@ -162,13 +157,7 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
         del ls_gpu
         cupy._default_memory_pool.free_all_blocks()
 
-      # Finally LP-solver on CPU
-      if verbose:
-        print("LP-solver, CPU")
-        
-      num_iters = N if n < 1000 else int(N/2)
-
-      for i in range(num_iters):
+        # LP-solver on CPU
 
         # Create instance
         ls_cpu = LPSolver(
@@ -189,7 +178,7 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
             max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
-        )
+          )
 
         # Time
         tik = time()
@@ -209,6 +198,41 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
         # Delete
         del ls_cpu
 
+        # JAX-opt
+        # Identity
+        identity = jnp.eye(n)
+        Q = jnp.zeros((n, n))
+        c_jnp = jnp.array(c)
+        A_jnp = jnp.array(A)
+        b_jnp = jnp.array(b)
+        C_jnp = jnp.array(C)
+        d_jnp = jnp.array(d)
+        lo_jnp = lo_bnd * jnp.ones((n))
+        up_jnp = up_bnd * jnp.ones((n))
+        inf_jnp = -jnp.inf * jnp.ones(d.shape[0])
+        E = jnp.vstack([A_jnp, C_jnp, identity])
+        l = jnp.hstack([b_jnp, inf_jnp, lo_jnp])
+        u = jnp.hstack([b_jnp, d_jnp, up_jnp])
+
+        qp = BoxOSQP()
+
+        tik = time()
+        sol = qp.run(params_obj=(Q, c_jnp), params_eq=E, params_ineq=(l, u))
+        tok = time()
+
+        if verbose:
+          print(f"JAX-opt solved {i + 1} time(s). Time: {tok-tik}")
+
+        x_jnp_opt = np.array(sol.params.primal[0])
+        opt_val = c @ x_jnp_opt
+
+        jax_times[count, i] = tok - tik
+        jax_values[count, i] = opt_val
+
+        if i == num_iters - 1 and verbose:
+          print(f"JAX-opt gets optimal value {opt_val}")
+
+
     if filename is not None:
      
       # Data to save
@@ -218,7 +242,9 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
               "ls_gpu_times" : ls_gpu_times.reshape((-1)),
               "ls_gpu_values" : ls_gpu_values.reshape((-1)),
               "ls_cpu_times" : ls_cpu_times.reshape((-1)),
-              "ls_cpu_values" : ls_cpu_values.reshape((-1))}
+              "ls_cpu_values" : ls_cpu_values.reshape((-1)),
+              "jax_times" : jax_times.reshape((-1)),
+              "jax_values" : jax_values.reshape(-1)}
 
       df = pd.DataFrame(data)
 
@@ -274,40 +300,38 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
       
       if verbose:
+        print("\n")
         print(f"n is {n}")
         print("Generate some data")
 
-      # Generate P
-      P_partial = np.random.uniform(low = -2, high = 2, size = (m, n))
-      P = P_partial.T @ P_partial + np.eye(n)
-      
-      # Generate A
-      A = np.random.uniform(low = -2, high = 2, size = (m, n))
-
-      # Generate C
-      C = np.random.uniform(low = -2, high = 2, size = (k, n))
-
-      # Generate x_feas and q
-      x_feas = np.random.uniform(low = -2, high = 2, size = (n))
-      q = np.random.uniform(low = -2, high = 2, size = (n))
-
-      # From this, calculate b and d
-      b = A @ x_feas
-      d = C @ x_feas
-
-      # Have upper and lower bounds
-      up_bnd = 3
-      lo_bnd = -3
-
-      # Create CVXPY problem
-      if verbose:
-        print("Solve in CVXPY")
-        
       num_iters = N if n < 1000 else int(N/2)
 
       for i in range(num_iters):
 
-        # Solve in CVXPY
+        # Generate P
+        P_partial = np.random.uniform(low = -2, high = 2, size = (m, n))
+        P = P_partial.T @ P_partial + np.eye(n)
+        
+        # Generate A
+        A = np.random.uniform(low = -2, high = 2, size = (m, n))
+
+        # Generate C
+        C = np.random.uniform(low = -2, high = 2, size = (k, n))
+
+        # Generate x_feas and q
+        x_feas = np.random.uniform(low = -2, high = 2, size = (n))
+        q = np.random.uniform(low = -2, high = 2, size = (n))
+
+        # From this, calculate b and d
+        b = A @ x_feas
+        d = C @ x_feas
+
+        # Have upper and lower bounds
+        up_bnd = 3
+        lo_bnd = -3
+
+        # Create CVXPY problem
+      
         x = cp.Variable(n)
 
         # Objective
@@ -342,13 +366,7 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         del constr
         del prob
 
-      # Move on to QP-solver on GPU
-      if verbose:
-        print("QP-solver, GPU")
-
-      num_iters = N if n < 1000 else int(N/2)
-      
-      for i in range(num_iters):
+        # Move on to QP-solver on GPU
 
         # Create instance
         qp_gpu = QPSolver(
@@ -391,13 +409,7 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         del qp_gpu
         cupy._default_memory_pool.free_all_blocks()
 
-      # Finally QP-solver on CPU
-      if verbose:
-        print("QP-solver, CPU")
-        
-      num_iters = N if n < 1000 else int(N/2)
-
-      for i in range(num_iters):
+        # Finally QP-solver on CPU
 
         # Create instance
         qp_cpu = QPSolver(
@@ -504,36 +516,35 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
       
       if verbose:
+        print("\n")
         print(f"n is {n}")
         print("Generate some data")
 
-      # Generate P and q
-      P_partial = np.random.uniform(low = -2, high = 2, size = (m, n))
-      P = P_partial.T @ P_partial + np.eye(n)
-      q = np.random.uniform(low = -2, high = 2, size = (n))
-      
-      # Generate a random feasible SOCP.
-      num_con = 10
-      A = []
-      b = []
-      c = []
-      d = []
-      x0 = np.random.randn(n)
-      for i in range(num_con):
-          A.append(np.random.randn(m, n))
-          b.append(np.random.randn(m))
-          c.append(np.random.randn(n))
-          d.append(np.linalg.norm(A[i] @ x0 + b, 2) - c[i].T @ x0)
-      F = np.random.randn(k, n)
-      g = F @ x0
-
-      # Create CVXPY problem
-      if verbose:
-        print("Solve in CVXPY")
-
       num_iters = N if n < 1000 else int(N/2)
 
-      for i in range(num_iters):
+      for i in range(num_iters):  
+
+        # Generate P and q
+        P_partial = np.random.uniform(low = -2, high = 2, size = (m, n))
+        P = P_partial.T @ P_partial + np.eye(n)
+        q = np.random.uniform(low = -2, high = 2, size = (n))
+        
+        # Generate a random feasible SOCP.
+        num_con = 10
+        A = []
+        b = []
+        c = []
+        d = []
+        x0 = np.random.randn(n)
+        for i in range(num_con):
+            A.append(np.random.randn(m, n))
+            b.append(np.random.randn(m))
+            c.append(np.random.randn(n))
+            d.append(np.linalg.norm(A[i] @ x0 + b, 2) - c[i].T @ x0)
+        F = np.random.randn(k, n)
+        g = F @ x0
+
+        # Create CVXPY problem
 
         # Define and solve the CVXPY problem
         x = cp.Variable(n)
@@ -571,14 +582,7 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         del soc_constraints
         del prob
 
-      # Move on to SOCP-solver on GPU
-      if verbose:
-        print("SOCP-solver, GPU")
-
-      num_iters = N if n < 1000 else int(N/2)
-      
-      for i in range(num_iters):
-
+        # Move on to SOCP-solver on GPU
         # Create instance
         socp_gpu = SOCPSolver(
             P = P,
@@ -622,14 +626,7 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         del socp_gpu
         cupy._default_memory_pool.free_all_blocks()
 
-      # Move on to SOCP-solver on CPU
-      if verbose:
-        print("SOCP-solver, CPU")
-        
-      num_iters = N if n < 1000 else int(N/2)
-      
-      for i in range(num_iters):
-
+        # Move on to SOCP-solver on CPU
         # Create instance
         socp_cpu = SOCPSolver(
             P = P,
@@ -740,27 +737,26 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
       
       if verbose:
+        print("\n")
         print(f"n is {n}")
         print("Generate some data")
-
-      # Generate data
-      num_rows = m*3
-      num_nonzero = int(n * num_problems / 4) # create a sparse x_true with this many nonzero entries
-      A = np.random.rand(num_rows, n)
-      x_true = np.zeros((n, num_problems))
-      x_true[np.unravel_index(np.random.randint(0,n*num_problems, num_nonzero),
-                      (n, num_problems))] = np.random.uniform(0, 50, num_nonzero)
-      reg = 0.05 + 0.01*np.random.randn(num_problems) # give each subproblem a slightly different regularization
-      b = A @ x_true + np.random.randn(num_rows, num_problems)
-      A = np.hstack((np.ones((num_rows,1)), A))
-
-      # Create CVXPY problem
-      if verbose:
-        print("Solve in CVXPY")
 
       num_iters = N if n < 1000 else int(N/2)
 
       for i in range(num_iters):
+
+        # Generate data
+        num_rows = m*3
+        num_nonzero = int(n * num_problems / 4) # create a sparse x_true with this many nonzero entries
+        A = np.random.rand(num_rows, n)
+        x_true = np.zeros((n, num_problems))
+        x_true[np.unravel_index(np.random.randint(0,n*num_problems, num_nonzero),
+                        (n, num_problems))] = np.random.uniform(0, 50, num_nonzero)
+        reg = 0.05 + 0.01*np.random.randn(num_problems) # give each subproblem a slightly different regularization
+        b = A @ x_true + np.random.randn(num_rows, num_problems)
+        A = np.hstack((np.ones((num_rows,1)), A))
+
+        # Create CVXPY problem
 
         # time how long it takes to solve all the problems in CVXPY (we must solve sequentially)
         obj_vals = []
@@ -786,13 +782,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         if i == num_iters - 1 and verbose:
             print(f"Problem is {prob.status}")
 
-      # Move on to Lasso-solver on GPU
-      if verbose:
-        print("LASSO-solver, GPU")
-
-      num_iters = N if n < 1000 else int(N/2)
-      
-      for i in range(num_iters):
+        # Move on to Lasso-solver on GPU
 
         # Create instance
         lasso_gpu = LassoSolver(
@@ -828,13 +818,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         del lasso_gpu
         cupy._default_memory_pool.free_all_blocks()
 
-      # Move on to LASSO-solver on CPU
-      if verbose:
-        print("LASSO-solver, CPU")
-      
-      num_iters = N if n < 1000 else int(N/2)
-
-      for i in range(num_iters):
+        # Move on to LASSO-solver on CPU
 
         # Create instance
         lasso_cpu = LassoSolver(
