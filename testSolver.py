@@ -7,9 +7,11 @@ from QPSolver import QPSolver
 from SOCPSolver import SOCPSolver
 from LassoSolver import LassoSolver
 import cvxpy as cp
+import cupy
 from time import time
 import pandas as pd
 
+print("script started", flush=True)
 
 def test_LP(n_values, verbose = False, N = 10, filename = None):
     """
@@ -29,11 +31,11 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
     n_values = np.array(n_values, dtype = np.int32)
 
     # Calculate m and k values
-    m_values = np.array(0.8 * n_values, dtype = np.int32)
-    k_values = np.array(0.2 * n_values, dtype = np.int32)
+    m_values = (0.8 * n_values).astype(int)
+    k_values = (0.2 * n_values).astype(int)
 
     # How many tests
-    num_tests = n_values.shape[0]
+    num_tests = len(n_values)
 
     # Containers for storing times
     cvxpy_times = np.zeros((num_tests, N))  # Every row is for a different
@@ -73,8 +75,10 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
       # Create CVXPY problem
       if verbose:
         print("Solve in CVXPY")
+        
+      num_iters = N if n < 1000 else int(N/2)
 
-      for i in range(N):
+      for i in range(num_iters):
 
         # Solve in CVXPY
         x = cp.Variable(n)
@@ -94,13 +98,13 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"CVXPY solved {i + 1} time(s)")
+          print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         cvxpy_times[count, i] = tok - tik
         cvxpy_values[count, i] = obj.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
             print(f"Problem is {prob.status}")
             print(f"CVXPY gets optimal value of {obj.value}")
 
@@ -113,8 +117,10 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
       # Move on to LP-solver on GPU
       if verbose:
         print("LP-solver, GPU")
+
+      num_iters = N if n < 1000 else int(N/2)
       
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         ls_gpu = LPSolver(
@@ -128,10 +134,11 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = True,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
             max_inner_iters = 20, 
+            max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
         )
@@ -142,23 +149,26 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"LP-solver, GPU solved {i + 1} time(s)")
+          print(f"LP-solver, GPU solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         ls_gpu_times[count, i] = tok - tik
         ls_gpu_values[count, i] = ls_gpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"LP-solver, GPU, gets optimal value {ls_gpu.value}")
 
-        # Delete
+        # Delete, clear GPU memory
         del ls_gpu
+        cupy._default_memory_pool.free_all_blocks()
 
       # Finally LP-solver on CPU
       if verbose:
         print("LP-solver, CPU")
+        
+      num_iters = N if n < 1000 else int(N/2)
 
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         ls_cpu = LPSolver(
@@ -172,10 +182,11 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = False,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
             max_inner_iters = 20, 
+            max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
         )
@@ -186,13 +197,13 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"LP-solver, CPU solved {i + 1} time(s)")
+          print(f"LP-solver, CPU solved {i + 1} time(s). Time: {tok-tik}")
 
         # Store
         ls_cpu_times[count, i] = tok - tik
         ls_cpu_values[count, i] = ls_cpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"LP-solver, CPU, gets optimal value {ls_cpu.value}")
 
         # Delete
@@ -291,8 +302,10 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
       # Create CVXPY problem
       if verbose:
         print("Solve in CVXPY")
+        
+      num_iters = N if n < 1000 else int(N/2)
 
-      for i in range(N):
+      for i in range(num_iters):
 
         # Solve in CVXPY
         x = cp.Variable(n)
@@ -313,13 +326,13 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"CVXPY solved {i + 1} time(s)")
+          print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         cvxpy_times[count, i] = tok - tik
         cvxpy_values[count, i] = obj.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
             print(f"Problem is {prob.status}")
             print(f"CVXPY gets optimal value of {obj.value}")
 
@@ -332,8 +345,10 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
       # Move on to QP-solver on GPU
       if verbose:
         print("QP-solver, GPU")
+
+      num_iters = N if n < 1000 else int(N/2)
       
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         qp_gpu = QPSolver(
@@ -348,10 +363,11 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = True,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
             max_inner_iters = 20, 
+            max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
         )
@@ -362,23 +378,26 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"QP-solver, GPU solved {i + 1} time(s)")
+          print(f"QP-solver, GPU solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         qp_gpu_times[count, i] = tok - tik
         qp_gpu_values[count, i] = qp_gpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"QP-solver, GPU, gets optimal value {qp_gpu.value}")
 
         # Delete
         del qp_gpu
+        cupy._default_memory_pool.free_all_blocks()
 
       # Finally QP-solver on CPU
       if verbose:
         print("QP-solver, CPU")
+        
+      num_iters = N if n < 1000 else int(N/2)
 
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         qp_cpu = QPSolver(
@@ -393,11 +412,11 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = False,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
-            max_outer_iters = 200,
-            max_inner_iters = 200, 
+            max_outer_iters = 20,
+            max_inner_iters = 50, 
             beta = 0.5,
             alpha = 0.05
         )
@@ -408,13 +427,13 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"QP-solver, CPU solved {i + 1} time(s)")
+          print(f"QP-solver, CPU solved {i + 1} time(s). Time: {tok-tik}")
 
         # Store
         qp_cpu_times[count, i] = tok - tik
         qp_cpu_values[count, i] = qp_cpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"QP-solver, CPU, gets optimal value {qp_cpu.value}")
 
         # Delete
@@ -494,7 +513,7 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
       q = np.random.uniform(low = -2, high = 2, size = (n))
       
       # Generate a random feasible SOCP.
-      num_con = 5
+      num_con = 10
       A = []
       b = []
       c = []
@@ -512,14 +531,16 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
       if verbose:
         print("Solve in CVXPY")
 
-      for i in range(N):
+      num_iters = N if n < 1000 else int(N/2)
+
+      for i in range(num_iters):
 
         # Define and solve the CVXPY problem
         x = cp.Variable(n)
 
         # Constrains
         soc_constraints = [
-              cp.SOC(c[i].T @ x + d[i], A[i] @ x + b[i]) for i in range(num_con)
+              cp.SOC(c[j].T @ x + d[j], A[j] @ x + b[j]) for j in range(num_con)
         ]
 
         # objective
@@ -534,13 +555,13 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"CVXPY solved {i} time(s)")
+          print(f"CVXPY solved {i} time(s). Time: {tok-tik}")
         
         # Store
         cvxpy_times[count, i] = tok - tik
         cvxpy_values[count, i] = obj.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
             print(f"Problem is {prob.status}")
             print(f"CVXPY gets optimal value of {obj.value}")
 
@@ -553,8 +574,10 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
       # Move on to SOCP-solver on GPU
       if verbose:
         print("SOCP-solver, GPU")
+
+      num_iters = N if n < 1000 else int(N/2)
       
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         socp_gpu = SOCPSolver(
@@ -571,10 +594,11 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = True,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
             max_inner_iters = 20, 
+            max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
         )
@@ -585,23 +609,26 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"SOCP-solver, GPU solved {i + 1} time(s)")
+          print(f"SOCP-solver, GPU solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         socp_gpu_times[count, i] = tok - tik
         socp_gpu_values[count, i] = socp_gpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"SOCP-solver, GPU, gets optimal value {socp_gpu.value}")
 
         # Delete
         del socp_gpu
+        cupy._default_memory_pool.free_all_blocks()
 
       # Move on to SOCP-solver on CPU
       if verbose:
         print("SOCP-solver, CPU")
+        
+      num_iters = N if n < 1000 else int(N/2)
       
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         socp_cpu = SOCPSolver(
@@ -618,10 +645,11 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = True,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-8, 
+            epsilon = 1e-4, 
             mu = 15, 
             t0 = 1,
             max_inner_iters = 20, 
+            max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
         )
@@ -632,13 +660,13 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"SOCP-solver, CPU solved {i + 1} time(s)")
+          print(f"SOCP-solver, CPU solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         socp_cpu_times[count, i] = tok - tik
         socp_cpu_values[count, i] = socp_cpu.value
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
           print(f"SOCP-solver, CPU, gets optimal value {socp_cpu.value}")
 
         # Delete
@@ -730,7 +758,9 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
       if verbose:
         print("Solve in CVXPY")
 
-      for i in range(N):
+      num_iters = N if n < 1000 else int(N/2)
+
+      for i in range(num_iters):
 
         # time how long it takes to solve all the problems in CVXPY (we must solve sequentially)
         obj_vals = []
@@ -747,20 +777,22 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"CVXPY solved {i + 1} time(s)")
+          print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         cvxpy_times[count, i] = tok - tik
         cvxpy_values[count, i, :] = np.array(obj_vals)
 
-        if i == N - 1 and verbose:
+        if i == num_iters - 1 and verbose:
             print(f"Problem is {prob.status}")
 
       # Move on to Lasso-solver on GPU
       if verbose:
         print("LASSO-solver, GPU")
+
+      num_iters = N if n < 1000 else int(N/2)
       
-      for i in range(N):
+      for i in range(num_iters):
 
         # Create instance
         lasso_gpu = LassoSolver(
@@ -768,16 +800,15 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
             b = b,
             reg=reg,
             rho=0.4,
-            max_iters=1000,
+            max_iters=5000,
             check_stop=10,
             add_bias=True,
             normalize_A=False,
             positive=False,
-            compute_loss=True,
+            compute_loss=False,
             adaptive_rho=False,
             use_gpu=True,
             num_chunks=0,
-            eps_rel=1e-3,
             check_cvxpy=False
         )
 
@@ -787,7 +818,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"LASSO-solver, GPU solved {i + 1} time(s)")
+          print(f"LASSO-solver, GPU solved {i + 1} time(s). Time: {tok-tik}")
 
         # Store
         lasso_gpu_times[count, i] = tok - tik
@@ -795,12 +826,15 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
 
         # Delete
         del lasso_gpu
+        cupy._default_memory_pool.free_all_blocks()
 
       # Move on to LASSO-solver on CPU
       if verbose:
         print("LASSO-solver, CPU")
       
-      for i in range(N):
+      num_iters = N if n < 1000 else int(N/2)
+
+      for i in range(num_iters):
 
         # Create instance
         lasso_cpu = LassoSolver(
@@ -813,7 +847,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
             add_bias=True,
             normalize_A=False,
             positive=False,
-            compute_loss=True,
+            compute_loss=False,
             adaptive_rho=False,
             use_gpu=False,
             num_chunks=0,
@@ -827,7 +861,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         tok = time()
 
         if verbose:
-          print(f"LASSO-solver, CPU solved {i + 1} time(s)")
+          print(f"LASSO-solver, CPU solved {i + 1} time(s). Time: {tok-tik}")
         
         # Store
         lasso_cpu_times[count, i] = tok - tik
@@ -988,13 +1022,13 @@ def plot_results(filename, origin):
   plt.show()
 
 def main():
-  n_values = np.array([100, 200]) # Every problem dimension to try
+  n_values = np.array([100, 200, 300,400,500,600,700,800,900,1000,1200,1300,1500,1750,2000,2500,3000,4000,5000]) # Every problem dimension to try
+  #n_values = np.array([5000])
   verbose = True # Should probably be False
   N = 10 # Number of tests for each dimension
-  filename = "testResults" # filename, files will have this as base and then stuff added
+  filename = "timing_results/testResults" # filename, files will have this as base and then stuff added
 
   test_all_solvers(n_values, verbose, N, filename)
-  return
 
 if __name__ == "__main__":
   main()

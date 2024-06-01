@@ -608,7 +608,7 @@ class LassoSolver:
 
                 if self.cvxpy_vals is not None:
                     iter_min = min(self.cvxpy_vals[i], iter_min)
-                ax.plot(iter_gaps - iter_min)
+                ax.plot(iter_gaps[:-1] - iter_min)
             else:
                 ax.plot(iter_gaps)
         ax.set_ylabel("Optimality gap")

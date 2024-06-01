@@ -597,9 +597,9 @@ class LPSolver:
                 self.A is None
                 or (
                     self.use_gpu
-                    and cp.linalg.norm(cp.matmul(self.A, x) - self.b) < 1e-3
+                    and cp.linalg.norm(cp.matmul(self.A, x) - self.b) < 1e-4 * self.n
                 )
-                or (np.linalg.norm(np.matmul(self.A, x) - self.b) < 1e-3)
+                or (np.linalg.norm(np.matmul(self.A, x) - self.b) < 1e-4 * self.n)
             ):
 
                 obj_val = self.fm.objective()

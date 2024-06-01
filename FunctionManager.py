@@ -392,7 +392,10 @@ class FunctionManagerPhase1(FunctionManager):
         self.s = -self.slacks.min() + 1
         self.update_slacks_fxn()
         if not suppress_print:
-            print(f"Starting slack of {round(self.s, 4)}")
+            if self.use_gpu:
+                print(f"Starting slack of {cp.round(self.s, 4)}")
+            else:
+                print(f"Starting slack of {np.round(self.s, 4)}")
 
         self.update_obj = True
         self.update_newton_obj = True

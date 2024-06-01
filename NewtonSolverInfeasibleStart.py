@@ -181,7 +181,7 @@ class NewtonSolverInfeasibleStart:
         # make sure our next step is in the domain of f
         self.fm.update_x(next_x)
 
-        while (self.fm.slacks < 0).any():
+        while ((self.fm.slacks) < 0).any():
             step_size *= self.beta
             if step_size < 1e-13:
                 if not self.suppress_print:

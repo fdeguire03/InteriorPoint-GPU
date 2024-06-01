@@ -83,7 +83,7 @@ class NewtonSolver:
 
         v0 parameter is included for compatibility with the NewtonSolverInfeasibleStart class, but it is not used
         """
-
+        
         # place everything in a try-except block so we can report if there was an error during solve
         try:
 
@@ -171,7 +171,7 @@ class NewtonSolver:
 
         self.fm.update_x(next_x)
 
-        while (self.fm.slacks < 0).any():
+        while ((self.fm.slacks) < 0).any():
             step_size *= self.beta
             if step_size < 1e-13:
                 if not self.suppress_print:
