@@ -10,18 +10,18 @@ import cvxpy as cp
 import cupy
 from time import time
 import pandas as pd
-import jax.numpy as jnp
-from jaxopt import BoxOSQP
 
-print("script started", flush=True)
-
-def test_LP(n_values, verbose = False, N = 10, filename = None):
+def test_LP(n_values, verbose = False, N = 10, filename = None, use_jax=False):
     """
     Takes in a numpy vector n_values. Every element is the
     number of dimensions for every test. If verbose if True, 
     the solver will print throughout the test. N is how many 
     times every problem should be solved.
     """
+    
+    if use_jax:
+        import jax.numpy as jnp
+        from jaxopt import BoxOSQP
 
     if verbose:
       print("------ Starting LP-test ------")
@@ -43,13 +43,16 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
     cvxpy_times = np.zeros((num_tests, N))  # Every row is for a different
     ls_gpu_times = np.zeros((num_tests, N)) # dimension and every
     ls_cpu_times = np.zeros((num_tests, N)) # column is a different test
-    jax_times = np.zeros((num_tests, N))
+    
 
     # Containers for storing optimal values
     cvxpy_values = np.zeros((num_tests, N))
     ls_gpu_values = np.zeros((num_tests, N))
     ls_cpu_values = np.zeros((num_tests, N))
-    jax_values = np.zeros((num_tests, N))
+    
+    if use_jax:
+        jax_values = np.zeros((num_tests, N))
+        jax_times = np.zeros((num_tests, N))
 
     ### Run test on LP
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
@@ -202,40 +205,43 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
 
         # Delete
         del ls_cpu
+        
+        if use_jax:
 
-        # JAX-opt
-        # Identity
-        identity = jnp.eye(n)
-        Q = jnp.zeros((n, n))
-        c_jnp = jnp.array(c)
-        A_jnp = jnp.array(A)
-        b_jnp = jnp.array(b)
-        C_jnp = jnp.array(C)
-        d_jnp = jnp.array(d)
-        lo_jnp = lo_bnd * jnp.ones((n))
-        up_jnp = up_bnd * jnp.ones((n))
-        inf_jnp = -jnp.inf * jnp.ones(d.shape[0])
-        E = jnp.vstack([A_jnp, C_jnp, identity])
-        l = jnp.hstack([b_jnp, inf_jnp, lo_jnp])
-        u = jnp.hstack([b_jnp, d_jnp, up_jnp])
+            # JAX-opt
+            # Identity
+            identity = jnp.eye(n)
+            #Q = None
+            Q = jnp.zeros((n, n))
+            c_jnp = jnp.array(c)
+            A_jnp = jnp.array(A)
+            b_jnp = jnp.array(b)
+            C_jnp = jnp.array(C)
+            d_jnp = jnp.array(d)
+            lo_jnp = lo_bnd * jnp.ones((n))
+            up_jnp = up_bnd * jnp.ones((n))
+            inf_jnp = -jnp.inf * jnp.ones(d.shape[0])
+            E = jnp.vstack([A_jnp, C_jnp, identity])
+            l = jnp.hstack([b_jnp, inf_jnp, lo_jnp])
+            u = jnp.hstack([b_jnp, d_jnp, up_jnp])
 
-        qp = BoxOSQP()
+            qp = BoxOSQP()
 
-        tik = time()
-        sol = qp.run(params_obj=(Q, c_jnp), params_eq=E, params_ineq=(l, u))
-        tok = time()
+            tik = time()
+            sol = qp.run(params_obj=(Q, c_jnp), params_eq=E, params_ineq=(l, u))
+            tok = time()
 
-        if verbose:
-          print(f"JAX-opt solved {i + 1} time(s). Time: {tok-tik}")
+            if verbose:
+              print(f"JAX-opt solved {i + 1} time(s). Time: {tok-tik}")
 
-        x_jnp_opt = np.array(sol.params.primal[0])
-        opt_val = c @ x_jnp_opt
+            x_jnp_opt = np.array(sol.params.primal[0])
+            opt_val = c @ x_jnp_opt
 
-        jax_times[count, i] = tok - tik
-        jax_values[count, i] = opt_val
+            jax_times[count, i] = tok - tik
+            jax_values[count, i] = opt_val
 
-        if i == num_iters - 1 and verbose:
-          print(f"JAX-opt gets optimal value {opt_val}")
+            if i == num_iters - 1 and verbose:
+              print(f"JAX-opt gets optimal value {opt_val}")
 
 
     if filename is not None:
@@ -247,9 +253,10 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
               "ls_gpu_times" : ls_gpu_times.reshape((-1)),
               "ls_gpu_values" : ls_gpu_values.reshape((-1)),
               "ls_cpu_times" : ls_cpu_times.reshape((-1)),
-              "ls_cpu_values" : ls_cpu_values.reshape((-1)),
-              "jax_times" : jax_times.reshape((-1)),
-              "jax_values" : jax_values.reshape(-1)}
+              "ls_cpu_values" : ls_cpu_values.reshape((-1))}
+      if use_jax:
+            data["jax_times"] = jax_times.reshape((-1))
+            data["jax_values"] = jax_values.reshape(-1)
 
       df = pd.DataFrame(data)
 
@@ -267,13 +274,17 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
 
     return
 
-def test_QP(n_values, verbose = False, N = 10, filename = None):
+def test_QP(n_values, verbose = False, N = 10, filename = None, use_jax=False):
     """
     Takes in a numpy vector n_values. Every element is the
     number of dimensions for every test. If verbose if True, 
     the solver will print throughout the test. N is how many 
     times every problem should be solved.
     """
+    
+    if use_jax:
+        import jax.numpy as jnp
+        from jaxopt import BoxOSQP
 
     if verbose:
       print("------ Starting QP-test ------")
@@ -295,14 +306,25 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
     cvxpy_times = np.zeros((num_tests, N))  # Every row is for a different
     qp_gpu_times = np.zeros((num_tests, N)) # dimension and every
     qp_cpu_times = np.zeros((num_tests, N)) # column is a different test
+    qp_gpu_times_allinequality = np.zeros((num_tests, N)) # dimension and every
+    qp_cpu_times_allinequality = np.zeros((num_tests, N)) # column is a different test
+    
 
     # Containers for storing optimal values
     cvxpy_values = np.zeros((num_tests, N))
     qp_gpu_values = np.zeros((num_tests, N))
     qp_cpu_values = np.zeros((num_tests, N))
+    qp_gpu_values_allinequality = np.zeros((num_tests, N))
+    qp_cpu_values_allinequality = np.zeros((num_tests, N))
+
+    if use_jax:
+        jax_values = np.zeros((num_tests, N))
+        jax_times = np.zeros((num_tests, N))
 
     ### Run test on QP
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
+        
+      k = 20
       
       if verbose:
         print("\n")
@@ -391,13 +413,13 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = True,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-4, 
+            epsilon = 1e-8, 
             mu = 15, 
-            t0 = 1,
-            max_inner_iters = 20, 
+            t0 = 0.01,
+            max_inner_iters = 100, 
             max_outer_iters=10,
-            beta = 0.5,
-            alpha = 0.05
+            beta = 0.6,
+            alpha = 0.4
         )
 
         # Time
@@ -422,8 +444,9 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         # Finally QP-solver on CPU
 
         # Create instance
+        # Create instance
         qp_cpu = QPSolver(
-            P = P, 
+            P = P,
             q = q,
             A = A,
             b = b,
@@ -434,13 +457,13 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
             use_gpu = False,
             suppress_print = True,
             check_cvxpy = False,
-            epsilon = 1e-4, 
+            epsilon = 1e-8, 
             mu = 15, 
-            t0 = 1,
-            max_outer_iters = 20,
-            max_inner_iters = 50, 
-            beta = 0.5,
-            alpha = 0.05
+            t0 = 0.01,
+            max_inner_iters = 100, 
+            max_outer_iters=10,
+            beta = 0.6,
+            alpha = 0.4
         )
 
         # Time
@@ -460,6 +483,135 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
 
         # Delete
         del qp_cpu
+        
+        """
+        # Move on to QP-solver on GPU
+        
+        C = np.vstack((C, A, -A))
+        d = np.hstack((d, np.ones(len(A)*2)*1e-3))
+
+        # Create instance
+        qp_gpu_inequ = QPSolver(
+            P = P,
+            q = q,
+            A = None,
+            b = None,
+            C = C,
+            d = d,
+            lower_bound = lo_bnd,
+            upper_bound = up_bnd,
+            use_gpu = True,
+            suppress_print = True,
+            check_cvxpy = False,
+            epsilon = 1e-8, 
+            mu = 15, 
+            t0 = 0.01,
+            phase1_t0 = 0.00001,
+            max_inner_iters = 100, 
+            max_outer_iters=10,
+            beta = 0.6,
+            alpha = 0.4
+        )
+
+        # Time
+        tik = time()
+        qp_gpu_inequ.solve()
+        tok = time()
+
+        if verbose:
+          print(f"QP-solver, GPU solved {i + 1} time(s). Time: {tok-tik}")
+        
+        # Store
+        qp_gpu_times_allinequality[count, i] = tok - tik
+        qp_gpu_values_allinequality[count, i] = qp_gpu_inequ.value
+
+        if i == num_iters - 1 and verbose:
+          print(f"QP-solver, GPU, gets optimal value {qp_gpu_inequ.value}")
+
+        # Delete
+        del qp_gpu_inequ
+        cupy._default_memory_pool.free_all_blocks()
+
+        # Finally QP-solver on CPU
+
+        # Create instance
+        # Create instance
+        qp_cpu_inequ = QPSolver(
+            P = P,
+            q = q,
+            A = None,
+            b = None,
+            C = C,
+            d = d,
+            lower_bound = lo_bnd,
+            upper_bound = up_bnd,
+            use_gpu = False,
+            suppress_print = True,
+            check_cvxpy = False,
+            epsilon = 1e-8, 
+            mu = 15, 
+            t0 = 0.01,
+            phase1_t0 = 0.00001,
+            max_inner_iters = 100, 
+            max_outer_iters=10,
+            beta = 0.6,
+            alpha = 0.4
+        )
+
+        # Time
+        tik = time()
+        qp_cpu_inequ.solve()
+        tok = time()
+
+        if verbose:
+          print(f"QP-solver, CPU solved {i + 1} time(s). Time: {tok-tik}")
+
+        # Store
+        qp_cpu_times_allinequality[count, i] = tok - tik
+        qp_cpu_values_allinequality[count, i] = qp_cpu_inequ.value
+
+        if i == num_iters - 1 and verbose:
+          print(f"QP-solver, CPU, gets optimal value {qp_cpu_inequ.value}")
+
+        # Delete
+        del qp_cpu_inequ
+        """
+
+        if use_jax:
+
+            # JAX-opt
+            # Identity
+            identity = jnp.eye(n)
+            Q = jnp.array(P)
+            c_jnp = jnp.array(q)
+            A_jnp = jnp.array(A)
+            b_jnp = jnp.array(b)
+            C_jnp = jnp.array(C)
+            d_jnp = jnp.array(d)
+            lo_jnp = lo_bnd * jnp.ones((n))
+            up_jnp = up_bnd * jnp.ones((n))
+            inf_jnp = -jnp.inf * jnp.ones(d.shape[0])
+            E = jnp.vstack([A_jnp, C_jnp, identity])
+            l = jnp.hstack([b_jnp, inf_jnp, lo_jnp])
+            u = jnp.hstack([b_jnp, d_jnp, up_jnp])
+
+            qp = BoxOSQP()
+
+            tik = time()
+            sol = qp.run(params_obj=(Q, c_jnp), params_eq=E, params_ineq=(l, u))
+            tok = time()
+
+            if verbose:
+              print(f"JAX-opt solved {i + 1} time(s). Time: {tok-tik}")
+
+            x_jnp_opt = np.array(sol.params.primal[0])
+            opt_val = 0.5 * x_jnp_opt.transpose() @ P @ x_jnp_opt + q @ x_jnp_opt
+
+            jax_times[count, i] = tok - tik
+            jax_values[count, i] = opt_val
+
+            if i == num_iters - 1 and verbose:
+              print(f"JAX-opt gets optimal value {opt_val}")
 
     if filename is not None:
      
@@ -469,8 +621,16 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
               "cvxpy_values" : cvxpy_values.reshape((-1)),
               "qp_gpu_times" : qp_gpu_times.reshape((-1)),
               "qp_gpu_values" : qp_gpu_values.reshape((-1)),
+              "qp_gpu_allinequality_times" : qp_gpu_times_allinequality.reshape((-1)),
+              "qp_gpu_allinequality_values" : qp_gpu_values_allinequality.reshape((-1)),
               "qp_cpu_times" : qp_cpu_times.reshape((-1)),
-              "qp_cpu_values" : qp_cpu_values.reshape((-1))}
+              "qp_cpu_values" : qp_cpu_values.reshape((-1)),
+              "qp_cpu_allinequality_times" : qp_cpu_times_allinequality.reshape((-1)),
+              "qp_cpu_allinequality_values" : qp_cpu_values_allinequality.reshape((-1))}
+
+      if use_jax:
+            data["jax_times"] = jax_times.reshape((-1))
+            data["jax_values"] = jax_values.reshape(-1)
 
       df = pd.DataFrame(data)
 
@@ -524,6 +684,8 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
 
     ### Run test on QP
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
+        
+      k = 50
       
       if verbose:
         print("\n")
@@ -545,57 +707,59 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         q = np.random.uniform(low = -2, high = 2, size = (n))
         
         # Generate a random feasible SOCP.
-        num_con = 10
+        num_con = 5
         A = []
         b = []
         c = []
         d = []
         x0 = np.random.randn(n)
-        for i in range(num_con):
+        for j in range(num_con):
             A.append(np.random.randn(m, n))
             b.append(np.random.randn(m))
             c.append(np.random.randn(n))
-            d.append(np.linalg.norm(A[i] @ x0 + b, 2) - c[i].T @ x0)
+            d.append(np.linalg.norm(A[j] @ x0 + b, 2) - c[j] @ x0)
         F = np.random.randn(k, n)
         g = F @ x0
 
         # Create CVXPY problem
-
-        # Define and solve the CVXPY problem
-        x = cp.Variable(n)
-
-        # Constrains
-        soc_constraints = [
-              cp.SOC(c[j].T @ x + d[j], A[j] @ x + b[j]) for j in range(num_con)
-        ]
-
-        # objective
-        P_cp = cp.psd_wrap(P)
-        obj = 0.5 * cp.quad_form(x, P_cp) + q @ x
-        prob = cp.Problem(cp.Minimize(obj),
-                          soc_constraints + [F @ x == g])
-
-        # Solve
-        tik = time()
-        prob.solve(solver = cp.CLARABEL)
-        tok = time()
-
-        if verbose:
-          print(f"CVXPY solved {i} time(s). Time: {tok-tik}")
         
-        # Store
-        cvxpy_times[count, i] = tok - tik
-        cvxpy_values[count, i] = obj.value
+        if n < 2000 and i == num_iters - 1:
 
-        if i == num_iters - 1 and verbose:
-            print(f"Problem is {prob.status}")
-            print(f"CVXPY gets optimal value of {obj.value}")
+            # Define and solve the CVXPY problem
+            x = cp.Variable(n)
 
-        # Delete objects just to be sure
-        del x
-        del obj
-        del soc_constraints
-        del prob
+            # Constrains
+            soc_constraints = [
+                  cp.SOC(c[j].T @ x + d[j], A[j] @ x + b[j]) for j in range(num_con)
+            ]
+
+            # objective
+            P_cp = cp.psd_wrap(P)
+            obj = 0.5 * cp.quad_form(x, P_cp) + q @ x
+            prob = cp.Problem(cp.Minimize(obj),
+                              soc_constraints + [F @ x == g])
+
+            # Solve
+            tik = time()
+            prob.solve(solver = cp.CLARABEL)
+            tok = time()
+
+            if verbose:
+              print(f"CVXPY solved {i} time(s). Time: {tok-tik}")
+
+            # Store
+            cvxpy_times[count, i] = tok - tik
+            cvxpy_values[count, i] = obj.value
+
+            if i == num_iters - 1 and verbose:
+                print(f"Problem is {prob.status}")
+                print(f"CVXPY gets optimal value of {obj.value}")
+
+            # Delete objects just to be sure
+            del x
+            del obj
+            del soc_constraints
+            del prob
 
         # Move on to SOCP-solver on GPU
         # Create instance
@@ -615,8 +779,8 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
             check_cvxpy = False,
             epsilon = 1e-4, 
             mu = 15, 
-            t0 = 1,
-            max_inner_iters = 20, 
+            t0 = 0.1,
+            max_inner_iters = 500,
             max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
@@ -654,13 +818,13 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
             g = g,
             lower_bound = None,
             upper_bound = None,
-            use_gpu = True,
+            use_gpu = False,
             suppress_print = True,
             check_cvxpy = False,
             epsilon = 1e-4, 
             mu = 15, 
-            t0 = 1,
-            max_inner_iters = 20, 
+            t0 = 0.1,
+            max_inner_iters = 500,
             max_outer_iters=10,
             beta = 0.5,
             alpha = 0.05
@@ -711,13 +875,18 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
 
     return
 
-def test_LASSO(n_values, verbose = False, N = 10, filename = None):
+def test_LASSO(n_values, verbose = False, N = 10, filename = None, use_jax=False):
     """
     Takes in a numpy vector n_values. Every element is the
     number of dimensions for every test. If verbose if True, 
     the solver will print throughout the test. N is how many 
     times every problem should be solved.
     """
+    
+    if use_jax:
+        from jaxopt import ProximalGradient
+        from jaxopt.prox import prox_lasso
+        import jax.numpy as jnp
 
     if verbose:
       print("------ Starting LASSO-test ------")
@@ -742,11 +911,13 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
     cvxpy_times = np.zeros((num_tests, N))  # Every row is for a different
     lasso_gpu_times = np.zeros((num_tests, N)) # dimension and every
     lasso_cpu_times = np.zeros((num_tests, N)) # column is a different test
+    lasso_jax_times = np.zeros((num_tests, N)) # column is a different test
 
     # Containers for storing optimal values
     cvxpy_values = np.zeros((num_tests, N, num_problems))
     lasso_gpu_values = np.zeros((num_tests, N, num_problems))
     lasso_cpu_values = np.zeros((num_tests, N, num_problems))
+    lasso_jax_values = np.zeros((num_tests, N, num_problems))
 
     ### Run test on QP
     for count, n, m, k in zip(np.arange(num_tests), n_values, m_values, k_values):
@@ -764,7 +935,7 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         num_iters = 3
 
       for i in range(num_iters):
-
+        
         # Generate data
         num_rows = m*3
         num_nonzero = int(n * num_problems / 4) # create a sparse x_true with this many nonzero entries
@@ -774,33 +945,39 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
                         (n, num_problems))] = np.random.uniform(0, 50, num_nonzero)
         reg = 0.05 + 0.01*np.random.randn(num_problems) # give each subproblem a slightly different regularization
         b = A @ x_true + np.random.randn(num_rows, num_problems)
-        A = np.hstack((np.ones((num_rows,1)), A))
+        A_prob = np.hstack((np.ones((num_rows,1)), A)) # add a bias term to A for CVXPY (LASSOSolver will automatically apply)
 
-        # Create CVXPY problem
+        if n < 600 and i == num_iters - 1: # CVXPY takes longer on LASSO problems, so run it only one time
 
-        # time how long it takes to solve all the problems in CVXPY (we must solve sequentially)
-        obj_vals = []
+            
 
-        tik = time()
+            # Create CVXPY problem
 
-        for r in reg:
-            x = cp.Variable(n+1)
-            obj = cp.Minimize(1/(2*num_rows)*cp.norm2(A @ x - b[:,0])**2 + r*cp.norm(x[1:], 1))
-            prob = cp.Problem(obj, [])
-            prob.solve(solver = cp.CLARABEL)
-            obj_vals.append(obj.value)
+            # time how long it takes to solve all the problems in CVXPY (we must solve sequentially)
+            obj_vals = []
 
-        tok = time()
+            tik = time()
 
-        if verbose:
-          print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
-        
-        # Store
-        cvxpy_times[count, i] = tok - tik
-        cvxpy_values[count, i, :] = np.array(obj_vals)
+            for j, r in enumerate(reg):
+                x = cp.Variable(n+1)
+                obj = cp.Minimize(1/(2*num_rows)*cp.norm2(A_prob  @ x - b[:,j])**2 + r*cp.norm(x[1:], 1))
+                prob = cp.Problem(obj, [])
+                prob.solve(solver = cp.CLARABEL)
+                obj_vals.append(obj.value)
 
-        if i == num_iters - 1 and verbose:
-            print(f"Problem is {prob.status}")
+            tok = time()
+
+            if verbose:
+              print(f"CVXPY solved {i + 1} time(s). Time: {tok-tik}")
+
+            # Store
+            cvxpy_times[count, i] = tok - tik
+            cvxpy_values[count, i, :] = np.array(obj_vals)
+
+            if i == num_iters - 1 and verbose:
+                print(f"Problem is {prob.status}")
+                print(f"CVXPY 5th solution value was {obj_vals[4]}")
+                
 
         # Move on to Lasso-solver on GPU
 
@@ -819,6 +996,8 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
             adaptive_rho=False,
             use_gpu=True,
             num_chunks=0,
+            eps_rel=1e-6,
+            eps_abs=1e-6,
             check_cvxpy=False
         )
 
@@ -832,7 +1011,10 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
 
         # Store
         lasso_gpu_times[count, i] = tok - tik
-        lasso_gpu_values[count, i, :] = lasso_gpu.objective().get()
+        lasso_gpu_values[count, i, :] = lasso_gpu.solutions.get()
+        
+        if i == num_iters - 1 and verbose:
+            print(f"GPU 5th solution value was {lasso_gpu_values[count, i, 4]}")
 
         # Delete
         del lasso_gpu
@@ -855,7 +1037,8 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
             adaptive_rho=False,
             use_gpu=False,
             num_chunks=0,
-            eps_rel=1e-3,
+            eps_rel=1e-6,
+            eps_abs=1e-6,
             check_cvxpy=False
         )
 
@@ -869,10 +1052,45 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         
         # Store
         lasso_cpu_times[count, i] = tok - tik
-        lasso_cpu_values[count, i, :] = lasso_cpu.objective()
+        lasso_cpu_values[count, i, :] = lasso_cpu.solutions
+        
+        if i == num_iters - 1 and verbose:
+            print(f"CPU 5th solution value was {lasso_cpu_values[count, i, 4]}")
+        
+        
 
         # Delete
         del lasso_cpu
+        
+        if use_jax:
+
+            def least_squares(w, data):
+              X,y  = data
+              residuals = jnp.dot(X, w) - y
+              return jnp.mean(residuals ** 2)
+
+            l1reg = 1.0
+            pg = ProximalGradient(fun=least_squares, prox=prox_lasso)
+
+            pg_sols = []
+
+            tik = time()
+            for j, r in enumerate(reg):
+                pg_sol = pg.run(jnp.array(np.zeros(A_prob.shape[1])), hyperparams_prox=r, data=(A_prob, b[:,j])).params
+                pg_sols.append(pg_sol)
+            tok = time()
+
+            if verbose:
+              print(f"JAX-opt solved {i + 1} time(s). Time: {tok-tik}")
+
+            opt_vals = [1/(2*A.shape[0]) * np.linalg.norm(A_prob@pg_sol - b[:,i])**2 + reg[i]*np.linalg.norm(pg_sol, 1) for i, pg_sol in enumerate(pg_sols)]
+
+            # Store
+            lasso_jax_times[count, i] = tok - tik
+            lasso_jax_values[count, i, :] = opt_vals
+
+            if i == num_iters - 1 and verbose:
+              print(f"JAX-opt gets 5th optimal value {opt_vals[4]}")
 
     if filename is not None:
      
@@ -883,8 +1101,12 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
               "lasso_cpu_times" : lasso_cpu_times.reshape((-1)),}
 
       data_values = {"cvxpy_values" : cvxpy_values.reshape((-1)),
-              "socp_gpu_values" : lasso_gpu_values.reshape((-1)),
-              "socp_cpu_values" : lasso_cpu_values.reshape((-1))}
+              "lasso_gpu_values" : lasso_gpu_values.reshape((-1)),
+              "lasso_cpu_values" : lasso_cpu_values.reshape((-1))}
+        
+      if use_jax:
+        data_values['lasso_jax_values'] = lasso_jax_values.reshape((-1))
+        data_times['lasso_jax_times'] = lasso_jax_times.reshape((-1))
 
       df_times = pd.DataFrame(data_times)
       df_values = pd.DataFrame(data_values)
@@ -907,14 +1129,14 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
 
     return
 
-def test_all_solvers(n_values, verbose = False, N = 10, filename = None):
+def test_all_solvers(n_values, verbose = False, N = 10, filename = None, use_jax=False):
   """
   Test all solvers
   """
-  test_LP(n_values, verbose, N, filename + "LP.csv")
-  test_QP(n_values, verbose, N, filename + "QP.csv")
-  test_SOCP(n_values, verbose, N, filename + "SOCP.csv")
-  test_LASSO(n_values, verbose, N, filename + "LASSO.csv")
+  #test_LP(n_values, verbose, N, filename + "LP.csv", use_jax)
+  test_QP(n_values, verbose, N, filename + "QP.csv", use_jax)
+  #test_SOCP(n_values, verbose, N, filename + "SOCP.csv")
+  #test_LASSO(n_values, verbose, N, filename + "LASSO.csv", use_jax)
 
   return
 
@@ -1025,13 +1247,17 @@ def plot_results(filename, origin):
 
   plt.show()
 
-def main():
+def main(use_jax=True):
+  if use_jax:
+        import jax.numpy as jnp
+        from jaxopt import BoxOSQP
   n_values = np.array([100, 200, 300,400,500,600,700,800,900,1000,1200,1300,1500,1750,2000,2500,3000,4000,5000]) # Every problem dimension to try
+  #n_values = np.array([100])
   verbose = True # Should probably be False
   N = 10 # Number of tests for each dimension
-  filename = "timing_results/testResults" # filename, files will have this as base and then stuff added
+  filename = "timing_results_jax/testResultsTake2" # filename, files will have this as base and then stuff added
 
-  test_all_solvers(n_values, verbose, N, filename)
+  test_all_solvers(n_values, verbose, N, filename, use_jax)
 
 if __name__ == "__main__":
   main()
