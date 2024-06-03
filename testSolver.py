@@ -275,9 +275,7 @@ def test_LP(n_values, verbose = False, N = 10, filename = None, use_jax=False):
 
     return
 
-
-def test_QP(n_values, verbose = False, N = 10, filename = None, use_jax=False):
-
+def test_LP_sparse(data_dir, data_files, verbose = False, N = 10, filename = None):
   """
   Takes in directory and list .npy files. Compares LP-solver to CVXPY on these files
   """
@@ -437,7 +435,6 @@ def test_QP(n_values, verbose = False, N = 10, filename = None, use_jax=False):
   return 
 
 def test_QP(n_values, verbose = False, N = 10, filename = None):
->>>>>>> 9cb23f75a3c965cced649ea00e866b8825c15815
     """
     Takes in a numpy vector n_values. Every element is the
     number of dimensions for every test. If verbose if True, 
