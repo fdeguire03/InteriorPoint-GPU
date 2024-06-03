@@ -56,7 +56,12 @@ def test_LP(n_values, verbose = False, N = 10, filename = None):
           print(f"n is {n}")
           print("Start testing")
 
-      num_iters = N if n < 1000 else int(N/2)
+      if n < 1000:
+        num_iters = N 
+      elif n < 2500:
+        num_iters = int(N/2)
+      else:
+        num_iters = 3
 
       for i in range(num_iters):
         
@@ -459,7 +464,12 @@ def test_QP(n_values, verbose = False, N = 10, filename = None):
         print(f"n is {n}")
         print("Generate some data")
 
-      num_iters = N if n < 1000 else int(N/2)
+      if n < 1000:
+        num_iters = N 
+      elif n < 2500:
+        num_iters = int(N/2)
+      else:
+        num_iters = 3
 
       for i in range(num_iters):
 
@@ -674,7 +684,12 @@ def test_SOCP(n_values, verbose = False, N = 10, filename = None):
         print(f"n is {n}")
         print("Generate some data")
 
-      num_iters = N if n < 1000 else int(N/2)
+      if n < 1000:
+        num_iters = N 
+      elif n < 2500:
+        num_iters = int(N/2)
+      else:
+        num_iters = 3
 
       for i in range(num_iters):  
 
@@ -894,7 +909,12 @@ def test_LASSO(n_values, verbose = False, N = 10, filename = None):
         print(f"n is {n}")
         print("Generate some data")
 
-      num_iters = N if n < 1000 else int(N/2)
+      if n < 1000:
+        num_iters = N 
+      elif n < 2500:
+        num_iters = int(N/2)
+      else:
+        num_iters = 3
 
       for i in range(num_iters):
 
@@ -1401,7 +1421,6 @@ def main():
 
   print("script started", flush=True)
   n_values = np.array([100, 200, 300,400,500,600,700,800,900,1000,1200,1300,1500,1750,2000,2500,3000,4000,5000]) # Every problem dimension to try
-  #n_values = np.array([5000])
   verbose = True # Should probably be False
   N = 10 # Number of tests for each dimension
   filename = "timing_results/testResults" # filename, files will have this as base and then stuff added
