@@ -17,6 +17,7 @@ def parse_csv(filename, origin):
     # Read the data, skipping the first line
     data_times = pd.read_csv(filenameTimes, skiprows=1)
     data_values = pd.read_csv(filenameValues, skiprows= 0)
+
     # Fix name error
     data_values = data_values.rename(columns = {"socp_gpu_values" : "lasso_gpu_values", 
                                                 "socp_cpu_values" : "lasso_cpu_values"})
@@ -31,21 +32,28 @@ def parse_csv(filename, origin):
     n_values_matrix = np.reshape(n_values_repeated, (-1, N))
     n_values = n_values_matrix[:, 0]
 
-    cvxpy_times = np.reshape(data_times["cvxpy_times"].to_numpy(), (num_tests, N))
+    lasso_jax_times = np.reshape(data_times["lasso_jax_times"].to_numpy(), (num_tests, N))
     lasso_gpu_times = np.reshape(data_times["lasso_gpu_times"].to_numpy(), (num_tests, N))
     lasso_cpu_times = np.reshape(data_times["lasso_cpu_times"].to_numpy(), (num_tests, N))
 
     # Parse data, values
     num_problems = 30 # fixed from testing
     
-    cvxpy_values = np.reshape(data_values["cvxpy_values"].to_numpy(), 
+    lasso_jax_values = np.reshape(data_values["lasso_jax_values"].to_numpy(), 
                               (num_tests, N, num_problems))
     lasso_gpu_values = np.reshape(data_values["lasso_gpu_values"].to_numpy(),
                               (num_tests, N, num_problems))
     lasso_cpu_values = np.reshape(data_values["lasso_cpu_values"].to_numpy(),
                               (num_tests, N, num_problems))
 
-    return N, num_tests, n_values, cvxpy_times, cvxpy_values, lasso_gpu_times, \
+    lasso_jax_times[np.where(lasso_jax_times == 0)] = np.nan
+    lasso_jax_values[np.where(lasso_jax_values == 0)] = np.nan
+    lasso_gpu_times[np.where(lasso_gpu_times == 0)] = np.nan
+    lasso_gpu_values[np.where(lasso_gpu_values == 0)] = np.nan
+    lasso_cpu_times[np.where(lasso_cpu_times == 0)] = np.nan
+    lasso_cpu_values[np.where(lasso_cpu_values == 0)] = np.nan
+
+    return N, num_tests, n_values, lasso_jax_times, lasso_jax_values, lasso_gpu_times, \
             lasso_gpu_values, lasso_cpu_times, lasso_cpu_values
 
   else:  
@@ -75,6 +83,15 @@ def parse_csv(filename, origin):
       jax_times = np.reshape(data["jax_times"].to_numpy(), (num_tests, N))
       jax_values = np.reshape(data["jax_values"].to_numpy(), (num_tests, N))
 
+      cvxpy_times[np.where(cvxpy_times == 0)] = np.nan
+      cvxpy_values[np.where(cvxpy_values == 0)] = np.nan
+      ls_gpu_times[np.where(ls_gpu_times == 0)] = np.nan
+      ls_gpu_values[np.where(ls_gpu_values == 0)] = np.nan
+      ls_cpu_times[np.where(ls_cpu_times == 0)] = np.nan
+      ls_cpu_values[np.where(ls_cpu_values == 0)] = np.nan
+      jax_times[np.where(jax_times == 0)] = np.nan
+      jax_values[np.where(jax_values == 0)] = np.nan
+
       return N, num_tests, n_values, cvxpy_times, cvxpy_values, ls_gpu_times, \
             ls_gpu_values, ls_cpu_times, ls_cpu_values, jax_times, jax_values
 
@@ -89,6 +106,15 @@ def parse_csv(filename, origin):
       jax_times = np.reshape(data["jax_times"].to_numpy(), (num_tests, N))
       jax_values = np.reshape(data["jax_values"].to_numpy(), (num_tests, N))
 
+      cvxpy_times[np.where(cvxpy_times == 0)] = np.nan
+      cvxpy_values[np.where(cvxpy_values == 0)] = np.nan
+      qp_gpu_times[np.where(qp_gpu_times == 0)] = np.nan
+      qp_gpu_values[np.where(qp_gpu_values == 0)] = np.nan
+      qp_cpu_times[np.where(qp_cpu_times == 0)] = np.nan
+      qp_cpu_values[np.where(qp_cpu_values == 0)] = np.nan
+      jax_times[np.where(jax_times == 0)] = np.nan
+      jax_values[np.where(jax_values == 0)] = np.nan
+
       return N, num_tests, n_values, cvxpy_times, cvxpy_values, qp_gpu_times, \
             qp_gpu_values, qp_cpu_times, qp_cpu_values, jax_times, jax_values
       
@@ -100,6 +126,13 @@ def parse_csv(filename, origin):
       socp_gpu_values = np.reshape(data["socp_gpu_values"].to_numpy(), (num_tests, N))
       socp_cpu_times = np.reshape(data["socp_cpu_times"].to_numpy(), (num_tests, N))
       socp_cpu_values = np.reshape(data["socp_cpu_values"].to_numpy(), (num_tests, N))
+
+      cvxpy_times[np.where(cvxpy_times == 0)] = np.nan
+      cvxpy_values[np.where(cvxpy_values == 0)] = np.nan
+      socp_gpu_times[np.where(socp_gpu_times == 0)] = np.nan
+      socp_gpu_values[np.where(socp_gpu_values == 0)] = np.nan
+      socp_cpu_times[np.where(socp_cpu_times == 0)] = np.nan
+      socp_cpu_values[np.where(socp_cpu_values == 0)] = np.nan
 
       return N, num_tests, n_values, cvxpy_times, cvxpy_values, socp_gpu_times, \
             socp_gpu_values, socp_cpu_times, socp_cpu_values
@@ -130,16 +163,16 @@ def get_result(filename, origin):
     print(f"For JAX, the average relative error is {jax_av_err}")
 
     # Calculate time averages
-    cvxpy_time_average = cvxpy_times.sum(axis = 1) / N
-    gpu_time_average = gpu_times.sum(axis = 1) / N
-    cpu_time_average = cpu_times.sum(axis = 1) / N
-    jax_time_average = jax_times.sum(axis = 1) / N
+    cvxpy_time_average = np.nanmean(cvxpy_times, axis = 1)
+    gpu_time_average = np.nanmean(gpu_times, axis = 1)
+    cpu_time_average = np.nanmean(cpu_times, axis = 1)
+    jax_time_average = np.nanmean(jax_times, axis = 1)
 
     # Calculate standard deviations
-    cvxpy_std = np.std(cvxpy_times, axis = 1)
-    gpu_std = np.std(gpu_times, axis = 1)
-    cpu_std = np.std(cpu_times, axis = 1)
-    jax_std = np.std(jax_times, axis = 1)
+    cvxpy_std = np.nanstd(cvxpy_times, axis = 1)
+    gpu_std = np.nanstd(gpu_times, axis = 1)
+    cpu_std = np.nanstd(cpu_times, axis = 1)
+    jax_std = np.nanstd(jax_times, axis = 1)
 
     ### Plot results
     x_ticks = np.arange(len(n_values))
@@ -256,19 +289,15 @@ def get_result(filename, origin):
     print(f"For {origin}-solver using GPU, the average relative error is {gpu_av_err}")
     print(f"For {origin}-solver using CPU, the average relative error is {cpu_av_err}")
 
-    # remove rows having all zeroes
-    truth_times_cutoff = truth_times[~np.all(truth_times == 0, axis=1)]
-    nonzero_rows = truth_times_cutoff.shape[0]
-
-    # Calculate averages
-    truth_time_average = truth_times_cutoff.sum(axis = 1) / N
-    gpu_time_average = gpu_times.sum(axis = 1) / N
-    cpu_time_average = cpu_times.sum(axis = 1) / N
+    # Calculate time averages
+    truth_time_average = np.nanmean(truth_times, axis = 1)
+    gpu_time_average = np.nanmean(gpu_times, axis = 1)
+    cpu_time_average = np.nanmean(cpu_times, axis = 1)
 
     # Calculate standard deviations
-    truth_std = np.std(truth_times_cutoff, axis = 1)
-    gpu_std = np.std(gpu_times, axis = 1)
-    cpu_std = np.std(cpu_times, axis = 1)
+    truth_std = np.nanstd(truth_times, axis = 1)
+    gpu_std = np.nanstd(gpu_times, axis = 1)
+    cpu_std = np.nanstd(cpu_times, axis = 1)
 
     ### Plot results
     x_ticks = np.arange(len(n_values))
@@ -276,9 +305,7 @@ def get_result(filename, origin):
     plt.figure(figsize=(10, 5))
     plt.title("Graph of average solving times for " + origin + " with errorbars")
     if origin == "LASSO":
-      plt.errorbar(x_ticks[:nonzero_rows], truth_time_average, yerr = truth_std, label = "JAX")
-    else:
-      plt.errorbar(x_ticks[:nonzero_rows], truth_time_average, yerr = truth_std, label = "CVXPY")
+      plt.errorbar(x_ticks, truth_time_average, yerr = truth_std, label = "JAX")
     plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = origin + "-solver GPU")
     plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = origin + "-solver CPU")
     plt.xticks(ticks = x_ticks, labels = x_labels)
@@ -292,8 +319,6 @@ def get_result(filename, origin):
     plt.title("Graph of average solving times for " + origin)
     if origin == "LASSO":
       plt.plot(truth_time_average, label = "JAX")
-    else:
-      plt.plot(truth_time_average, label = "CVXPY")
     plt.plot(gpu_time_average, label = origin + "-solver GPU")
     plt.plot(cpu_time_average, label = origin + "-solver CPU")
     plt.xticks(ticks = x_ticks, labels = x_labels)
@@ -306,9 +331,7 @@ def get_result(filename, origin):
     plt.figure(figsize=(10, 5))
     plt.title("Graph of average solving times for " + origin + " on a log-scale with errorbars")
     if origin == "LASSO":
-      plt.errorbar(x_ticks[:nonzero_rows], truth_time_average, yerr = truth_std, label = "JAX")
-    else:
-      plt.errorbar(x_ticks[:nonzero_rows], truth_time_average, yerr = truth_std, label = "CVXPY")
+      plt.errorbar(x_ticks, truth_time_average, yerr = truth_std, label = "JAX")
     plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = origin + "-solver GPU")
     plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = origin + "-solver CPU")
     plt.xticks(ticks = x_ticks, labels = x_labels)
@@ -323,8 +346,6 @@ def get_result(filename, origin):
     plt.title("Graph of average solving times for " + origin + " on a log-scale")
     if origin == "LASSO":
       plt.plot(truth_time_average, label = "JAX")
-    else:
-      plt.plot(truth_time_average, label = "CVXPY")
     plt.plot(gpu_time_average, label = origin + "-solver GPU")
     plt.plot(cpu_time_average, label = origin + "-solver CPU")
     plt.xticks(ticks = x_ticks, labels = x_labels)
@@ -334,9 +355,6 @@ def get_result(filename, origin):
     plt.legend()
     plt.savefig("testing/plots/" + origin + "averageLogarithmicLinePlot.png")
     plt.clf()
-
-    # Redefine cvxpy_time_average
-    truth_time_average = truth_times.sum(axis = 1) / N
 
     # Bar plot
     dims = n_values
@@ -348,7 +366,6 @@ def get_result(filename, origin):
       }
     else:
       timeResults = {
-          'CVXPY': truth_time_average,
           'GPU': gpu_time_average,
           'CPU': cpu_time_average,
       }
