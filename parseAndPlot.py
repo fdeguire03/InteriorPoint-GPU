@@ -79,17 +79,19 @@ def parse_csv(filename, origin):
             ls_gpu_values, ls_cpu_times, ls_cpu_values, jax_times, jax_values
 
     elif origin == "QP":
-      # Parse unique data for QP
+      # Parse unique data for LP
       cvxpy_times = np.reshape(data["cvxpy_times"].to_numpy(), (num_tests, N))
       cvxpy_values = np.reshape(data["cvxpy_values"].to_numpy(), (num_tests, N))
       qp_gpu_times = np.reshape(data["qp_gpu_times"].to_numpy(), (num_tests, N))
       qp_gpu_values = np.reshape(data["qp_gpu_values"].to_numpy(), (num_tests, N))
       qp_cpu_times = np.reshape(data["qp_cpu_times"].to_numpy(), (num_tests, N))
       qp_cpu_values = np.reshape(data["qp_cpu_values"].to_numpy(), (num_tests, N))
+      jax_times = np.reshape(data["jax_times"].to_numpy(), (num_tests, N))
+      jax_values = np.reshape(data["jax_values"].to_numpy(), (num_tests, N))
 
       return N, num_tests, n_values, cvxpy_times, cvxpy_values, qp_gpu_times, \
-            qp_gpu_values, qp_cpu_times, qp_cpu_values
-
+            qp_gpu_values, qp_cpu_times, qp_cpu_values, jax_times, jax_values
+      
     elif origin == "SOCP":
       # Parse unique data for SOCP
       cvxpy_times = np.reshape(data["cvxpy_times"].to_numpy(), (num_tests, N))
@@ -110,7 +112,7 @@ def get_result(filename, origin):
   print("------ Getting results for " + filename + " ------ \n")
   
   # Parse data
-  if origin == "LP":
+  if origin == "LP" or origin == "QP":
 
     N, num_tests, n_values, cvxpy_times, cvxpy_values, gpu_times, \
     gpu_values, cpu_times, cpu_values , jax_times, jax_values = \
@@ -121,7 +123,7 @@ def get_result(filename, origin):
     ls_cpu_av_err = calculate_average_relative_error(cvxpy_values, cpu_values)
     jax_av_err = calculate_average_relative_error(cvxpy_values, jax_values)
 
-    # Print average realtive error
+    # Print average relative error
     print("Considering CVXPY as ground truth: ")
     print(f"For LP-solver using GPU, the average relative error is {ls_gpu_av_err}")
     print(f"For LP-solver using CPU, the average relative error is {ls_cpu_av_err}")
@@ -133,19 +135,41 @@ def get_result(filename, origin):
     cpu_time_average = cpu_times.sum(axis = 1) / N
     jax_time_average = jax_times.sum(axis = 1) / N
 
+    # Calculate standard deviations
+    cvxpy_std = np.std(cvxpy_times, axis = 1)
+    gpu_std = np.std(gpu_times, axis = 1)
+    cpu_std = np.std(cpu_times, axis = 1)
+    jax_std = np.std(jax_times, axis = 1)
+
     ### Plot results
     x_ticks = np.arange(len(n_values))
     x_labels = n_values
     plt.title("Graph of average solving times for " + origin)
-    plt.plot(cvxpy_time_average, label = "CVXPY")
-    plt.plot(gpu_time_average, label = "LP-solver GPU")
-    plt.plot(cpu_time_average, label = "LP-solver CPU")
-    plt.plot(jax_time_average, label = "JAXopt")
+    plt.errorbar(x_ticks, cvxpy_time_average, yerr = cvxpy_std, label = "CVXPY")
+    plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = "LP-solver GPU")
+    plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = "LP-solver CPU")
+    plt.errorbar(x_ticks, jax_time_average, yerr = jax_std, label = "JAXopt")
     plt.xticks(ticks = x_ticks, labels = x_labels)
     plt.xlabel("Dimension n")
     plt.ylabel("Average solving time [s]")
     plt.legend()
-    plt.show()
+    plt.savefig("testing/plots/" + origin + "errorbarLinear.png")
+    plt.figure()
+    plt.clf()
+
+    plt.title("Graph of average solving times for " + origin + " on a log-scale")
+    plt.errorbar(x_ticks, cvxpy_time_average, yerr = cvxpy_std, label = "CVXPY")
+    plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = "LP-solver GPU")
+    plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = "LP-solver CPU")
+    plt.errorbar(x_ticks, jax_time_average, yerr= jax_std, label = "JAXopt")
+    plt.xticks(ticks = x_ticks, labels = x_labels)
+    plt.xlabel("Dimension n")
+    plt.ylabel("Average solving time [s]")
+    plt.yscale("log")
+    plt.legend()
+    plt.savefig("testing/plots/" + origin + "errorbarLogarithmic.png")
+    plt.figure()
+    plt.clf()
 
     dims = n_values
     timeResults = {
@@ -164,7 +188,7 @@ def get_result(filename, origin):
     for attribute, measurement in timeResults.items():
         offset = width * multiplier
         rects = ax.bar(x + offset, measurement, width, label=attribute)
-        ax.bar_label(rects, labels=[f'{val:.2f}' for val in measurement], padding=3)
+        # ax.bar_label(rects, padding = 3)#, labels=[f'{val:.2f}' for val in measurement])
         multiplier += 1
 
     # Add some text for labels, title and custom x-axis tick labels, etc.
@@ -173,8 +197,27 @@ def get_result(filename, origin):
     ax.set_title("Bar plot of average solving times for " + origin)
     ax.set_xticks(x + width, dims)
     ax.legend()
+    plt.savefig("testing/plots/" + origin + "averageLinearBarPlot.png")
+    plt.figure()
+    plt.clf()
 
-    plt.show()
+    fig, ax = plt.subplots(layout='constrained')
+
+    for attribute, measurement in timeResults.items():
+        offset = width * multiplier
+        rects = ax.bar(x + offset, measurement, width, label=attribute)
+        # ax.bar_label(rects, padding = 3)#, labels=[f'{val:.2f}' for val in measurement])
+        multiplier += 1
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_ylabel("Average solving time [s]")
+    ax.set_xlabel("Dimension n")
+    ax.set_title("Bar plot of average solving times for " + origin + " on a log-scale")
+    ax.set_xticks(x + width, dims)
+    ax.set_yscale("log")
+    ax.legend()
+    plt.savefig("testing/plots/" + origin + "averageLogarithmicBarPlot.png")
+    plt.clf()
 
   else:
   
@@ -185,19 +228,42 @@ def get_result(filename, origin):
     gpu_av_err = calculate_average_relative_error(cvxpy_values, gpu_values, origin == "LASSO")
     cpu_av_err = calculate_average_relative_error(cvxpy_values, cpu_values, origin == "LASSO")
     
-    # Print average relative error
+    # Print average relative error  
     print("Considering CVXPY as ground truth: ")
     print(f"For {origin}-solver using GPU, the average relative error is {gpu_av_err}")
     print(f"For {origin}-solver using CPU, the average relative error is {cpu_av_err}")
 
+    # remove rows having all zeroes
+    cvxpy_times_cutoff = cvxpy_times[~np.all(cvxpy_times == 0, axis=1)]
+    nonzero_rows = cvxpy_times_cutoff.shape[0]
+
     # Calculate averages
-    cvxpy_time_average = cvxpy_times.sum(axis = 1) / N
+    cvxpy_time_average = cvxpy_times_cutoff.sum(axis = 1) / N
     gpu_time_average = gpu_times.sum(axis = 1) / N
     cpu_time_average = cpu_times.sum(axis = 1) / N
+
+    # Calculate standard deviations
+    cvxpy_std = np.std(cvxpy_times_cutoff, axis = 1)
+    gpu_std = np.std(gpu_times, axis = 1)
+    cpu_std = np.std(cpu_times, axis = 1)
 
     ### Plot results
     x_ticks = np.arange(len(n_values))
     x_labels = n_values
+    plt.title("Graph of average solving times for " + origin + " with errorbars")
+    plt.errorbar(x_ticks[:nonzero_rows], cvxpy_time_average, yerr = cvxpy_std, label = "CVXPY")
+    plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = origin + "-solver GPU")
+    plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = origin + "-solver CPU")
+    #plt.plot(cvxpy_time_average, label = "CVXPY")
+    #plt.plot(gpu_time_average, label = origin + "-solver GPU")
+    #plt.plot(cpu_time_average, label = origin + "-solver CPU")
+    plt.xticks(ticks = x_ticks, labels = x_labels)
+    plt.xlabel("Dimension n")
+    plt.ylabel("Average solving time [s]")
+    plt.legend()
+    plt.savefig("testing/plots/" + origin + "errorbarLinear.png")
+    plt.clf()
+
     plt.title("Graph of average solving times for " + origin)
     plt.plot(cvxpy_time_average, label = "CVXPY")
     plt.plot(gpu_time_average, label = origin + "-solver GPU")
@@ -206,7 +272,35 @@ def get_result(filename, origin):
     plt.xlabel("Dimension n")
     plt.ylabel("Average solving time [s]")
     plt.legend()
-    plt.show()
+    plt.savefig("testing/plots/" + origin + "averageLinearLinePlot.png")
+    plt.clf()
+
+    plt.title("Graph of average solving times for " + origin + " on a log-scale with errorbars")
+    plt.errorbar(x_ticks[:nonzero_rows], cvxpy_time_average, yerr = cvxpy_std, label = "CVXPY")
+    plt.errorbar(x_ticks, gpu_time_average, yerr = gpu_std, label = origin + "-solver GPU")
+    plt.errorbar(x_ticks, cpu_time_average, yerr = cpu_std, label = origin + "-solver CPU")
+    plt.xticks(ticks = x_ticks, labels = x_labels)
+    plt.xlabel("Dimension n")
+    plt.ylabel("Average solving time [s]")
+    plt.yscale("log")
+    plt.legend()
+    plt.savefig("testing/plots/" + origin + "errorbarLogarithmic.png")
+    plt.clf()
+
+    plt.title("Graph of average solving times for " + origin + " on a log-scale")
+    plt.plot(cvxpy_time_average, label = "CVXPY")
+    plt.plot(gpu_time_average, label = origin + "-solver GPU")
+    plt.plot(cpu_time_average, label = origin + "-solver CPU")
+    plt.xticks(ticks = x_ticks, labels = x_labels)
+    plt.xlabel("Dimension n")
+    plt.ylabel("Average solving time [s]")
+    plt.yscale("log")
+    plt.legend()
+    plt.savefig("testing/plots/" + origin + "averageLogarithmicLinePlot.png")
+    plt.clf()
+
+    # Redefine cvxpy_time_average
+    cvxpy_time_average = cvxpy_times.sum(axis = 1) / N
 
     # Bar plot
     dims = n_values
@@ -225,7 +319,7 @@ def get_result(filename, origin):
     for attribute, measurement in timeResults.items():
         offset = width * multiplier
         rects = ax.bar(x + offset, measurement, width, label=attribute)
-        ax.bar_label(rects, labels=[f'{val:.2f}' for val in measurement], padding=3)
+        #ax.bar_label(rects, padding = 3, labels = None)#, labels=[f'{val:.2f}' for val in measurement])
         multiplier += 1
 
     # Add some text for labels, title and custom x-axis tick labels, etc.
@@ -234,10 +328,28 @@ def get_result(filename, origin):
     ax.set_title("Bar plot of average solving times for " + origin)
     ax.set_xticks(x + width, dims)
     ax.legend()
+    plt.savefig("testing/plots/" + origin + "averageLinearBarPlot.png")
+    plt.clf()
 
-    plt.show()
+    fig, ax = plt.subplots(layout='constrained')
 
-def calculate_average_relative_error(truth, test_results, lasso = False):
+    for attribute, measurement in timeResults.items():
+        offset = width * multiplier
+        rects = ax.bar(x + offset, measurement, width, label=attribute)
+        #ax.bar_label(rects, padding = 3, labels = None)#, labels=[f'{val:.2f}' for val in measurement])
+        multiplier += 1
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_ylabel("Average solving time [s]")
+    ax.set_xlabel("Dimension n")
+    ax.set_title("Bar plot of average solving times for " + origin + " on a log-scale")
+    ax.set_xticks(x + width, dims)
+    ax.set_yscale("log")
+    ax.legend()
+    plt.savefig("testing/plots/" + origin + "averageLogarithmicBarPlot.png")
+    plt.clf()
+
+def calculate_average_relative_error(truth, test_results, lasso = False, verbose = False):
   if not lasso:
     num_tests, N = truth.shape
 
@@ -247,25 +359,30 @@ def calculate_average_relative_error(truth, test_results, lasso = False):
     # Do naively since need to handle inf values in nice way
     # Can probably be done vectorized
     for test in range(num_tests):
-      test_truth = truth[test, :]
-      test_result = test_results[test, :]
+        test_truth = truth[test, :]
+        test_result = test_results[test, :]
 
-      # Mask out all real valued
-      mask = test_result != np.inf
+        # Mask out all real valued
+        mask_real = test_result != np.inf
+        # Mask out non-zeros
+        mask_nonzeros = test_result != 0
+        # Elementwise and
+        mask = np.logical_and(mask_real, mask_nonzeros)
 
-      print(f"Test {test + 1} had {N - mask.sum()} out of {N} iterations not converge")
+        if verbose:
+            print(f"Test {test + 1} had {mask_nonzeros.sum() - mask.sum()} out of {mask.sum()} iterations not converge")
 
-      if mask.sum() == 0:
-        # No tests converged, punish
-        dim_wise_average_error.append(np.inf)
-        continue
+        if mask.sum() == 0:
+            # No tests converged, punish
+            dim_wise_average_error.append(np.inf)
+            continue
 
-      rel_error_testwise = np.abs(test_truth[mask] - test_result[mask]) / \
-                           test_truth[mask]
+        rel_error_testwise = np.abs(test_truth[mask] - test_result[mask]) / \
+                            test_truth[mask]
 
-      rel_average_error = rel_error_testwise.sum() / mask.sum()
+        rel_average_error = rel_error_testwise.sum() / mask.sum()
 
-      dim_wise_average_error.append(rel_average_error)
+        dim_wise_average_error.append(rel_average_error)
 
     return sum(dim_wise_average_error) / num_tests
 
@@ -333,3 +450,8 @@ def summarize_results(filename, LP = True, QP = True, SOCP = True, LASSO = True)
       print(e)
 
   return
+
+get_result("testing/testing_results/testResults_jax_included_LP.csv", "LP")
+get_result("testing/testing_results/testResults_jax_included_QP.csv", "QP")
+get_result("testing/testing_results/testResults_no_jax_NoCVXPYSOCP.csv", "SOCP")
+get_result("testing/testing_results/testResults_jax_included_NoCVXPYLASSO.csv", "LASSO")
